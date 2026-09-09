@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#08111f">
+  <title>Codex Live Wall</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">CODEX DESKTOP / RUNNING ONLY</p>
+        <h1>Live wall</h1>
+        <p class="lede">Every card below is a currently unfinished session with a fresh local rollout event. Completed and stale history is never shown here.</p>
+      </div>
+      <div class="hero-actions">
+        <span id="connectionBadge" class="connection-badge connection-unknown">Connecting</span>
+        <button id="refreshButton" class="button button-ghost" type="button">Refresh</button>
+        <button id="copyButton" class="button button-primary" type="button">Copy access link</button>
+      </div>
+    </header>
+
+    <section id="notice" class="notice hidden" aria-live="polite"></section>
+
+    <section id="connectPanel" class="connect-panel hidden" aria-label="Connect to the live PC monitor">
+      <div>
+        <p class="eyebrow">REMOTE LIVE CONNECTION</p>
+        <h2>Connect this wall to the PC</h2>
+        <p>Paste the complete private access URL printed by <code>STATUS.cmd -ShowAccessUrl</code>. The hosted page contains no Codex data; it only reads the authenticated running-only feed from your PC.</p>
+      </div>
+      <div class="connect-form">
+        <label for="accessInput">PC access URL</label>
+        <input id="accessInput" type="url" placeholder="https://192.168.x.x:8766/#token=..." autocomplete="off" spellcheck="false">
+        <button id="connectButton" class="button button-primary" type="button">Connect live wall</button>
+      </div>
+    </section>
+
+    <section class="summary-grid" aria-label="Live session summary">
+      <article class="summary-card summary-card-hot">
+        <span class="summary-label">Running now</span>
+        <strong id="runningCount">—</strong>
+        <span class="summary-note">fresh unfinished rollouts</span>
+      </article>
+      <article class="summary-card">
+        <span class="summary-label">Live output</span>
+        <strong id="outputCount">—</strong>
+        <span class="summary-note">cards carrying durable output</span>
+      </article>
+      <article class="summary-card">
+        <span class="summary-label">Hidden history</span>
+        <strong id="hiddenCount">—</strong>
+        <span class="summary-note">completed, stale, or unverified</span>
+      </article>
+      <article class="summary-card">
+        <span class="summary-label">Telemetry</span>
+        <strong id="freshnessValue">—</strong>
+        <span class="summary-note">automatic event refresh</span>
+      </article>
+    </section>
+
+    <section class="toolbar" aria-label="Dashboard controls">
+      <label class="search-box">
+        <span class="sr-only">Search running sessions</span>
+        <input id="searchInput" type="search" placeholder="Search running sessions" autocomplete="off">
+      </label>
+      <div class="locked-mode" aria-label="Display mode">RUNNING ONLY · LOCKED</div>
+    </section>
+
+    <section class="status-strip">
+      <div>
+        <span class="live-dot"></span>
+        <span id="lastUpdate">Waiting for first live snapshot</span>
+      </div>
+      <span id="sourceSummary">Read-only rollout telemetry</span>
+    </section>
+
+    <section id="cards" class="card-grid" aria-live="polite" aria-label="Currently running Codex sessions"></section>
+    <section id="emptyState" class="empty-state hidden">
+      <div class="empty-icon">◌</div>
+      <h2>No currently running sessions</h2>
+      <p>Only fresh unfinished Codex rollouts appear. This wall intentionally hides completed and stale history.</p>
+    </section>
+
+    <footer class="footer">
+      <span>Read-only observer · existing Codex files are never written</span>
+      <span id="footerVersion">Monitor —</span>
+    </footer>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>
