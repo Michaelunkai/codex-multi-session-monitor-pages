@@ -4,6 +4,7 @@
   var state = {
     token: '',
     endpoint: '',
+    localAccess: false,
     snapshot: null,
     search: '',
     eventSource: null,
@@ -85,7 +86,7 @@
   function apiUrl(pathname) {
     var parsed = browserUrl((state.endpoint || window.location.origin).replace(/\/+$/, '') + '/' + pathname.replace(/^\/+/, ''));
     if (!parsed) return pathname;
-    parsed.searchParams.set('token', state.token);
+    if (state.token && !state.localAccess) parsed.searchParams.set('token', state.token);
     return parsed.toString();
   }
 
@@ -331,18 +332,21 @@
   }
 
   function requestSnapshot() {
-    if (!state.token) {
+    if (!state.token && !state.localAccess) {
       setConnection('Token needed', 'connection-reconnecting');
       setConnectPanel(true);
       setNotice('Paste the complete private PC access URL below. It contains the bearer token in the URL fragment and is not sent to the hosting service.');
       return Promise.resolve();
     }
-    return fetch(apiUrl('/api/snapshot'), { headers: { Authorization: 'Bearer ' + state.token }, cache: 'no-store' })
+    var requestOptions = { cache: 'no-store' };
+    if (state.token && !state.localAccess) requestOptions.headers = { Authorization: 'Bearer ' + state.token };
+    return fetch(apiUrl('/api/snapshot'), requestOptions)
       .then(function (response) {
         if (!response.ok) {
           if (response.status === 401) {
             forgetToken(state.endpoint);
             state.token = '';
+            state.localAccess = false;
             setConnectPanel(true);
           }
           throw new Error('snapshot HTTP ' + response.status);
@@ -352,7 +356,7 @@
       .then(function (snapshot) {
         render(failClosedSnapshot(snapshot));
         setConnectPanel(false);
-        setConnection(snapshot.source === 'synthetic-test' ? 'Test fixture' : 'Live', 'connection-live');
+        setConnection(snapshot.source === 'synthetic-test' ? 'Test fixture' : (state.localAccess ? 'Live · this PC' : 'Live'), 'connection-live');
       })
       .catch(function (error) {
         setConnection('Reconnecting', 'connection-reconnecting');
@@ -366,7 +370,7 @@
   }
 
   function connectEvents() {
-    if (!state.token || !window.EventSource) {
+    if ((!state.token && !state.localAccess) || !window.EventSource) {
       startPollingFallback();
       return;
     }
@@ -379,7 +383,7 @@
       try {
         var snapshot = failClosedSnapshot(JSON.parse(event.data));
         render(snapshot);
-        setConnection(snapshot.source === 'synthetic-test' ? 'Test fixture' : 'Live', 'connection-live');
+        setConnection(snapshot.source === 'synthetic-test' ? 'Test fixture' : (state.localAccess ? 'Live · this PC' : 'Live'), 'connection-live');
       } catch (error) {
         setNotice('Invalid live snapshot: ' + error.message);
       }
@@ -418,6 +422,7 @@
     }
     state.endpoint = parsed.endpoint;
     state.token = parsed.token;
+    state.localAccess = originOf(state.endpoint) === window.location.origin;
     updateUrlToken();
     if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
     if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
@@ -428,7 +433,8 @@
     var initial = parseAccessLink(window.location.href) || { endpoint: defaultEndpoint(), token: '' };
     state.endpoint = initial.endpoint;
     state.token = initial.token || readSavedToken(state.endpoint);
-    if (state.token) updateUrlToken();
+    state.localAccess = originOf(state.endpoint) === window.location.origin;
+    if (state.token && !state.localAccess) updateUrlToken();
     setInterval(function () {
       document.querySelectorAll('[data-activity-at]').forEach(function (node) { node.textContent = formatAge((Date.now() - Date.parse(node.dataset.activityAt)) / 1000); });
       document.querySelectorAll('[data-started-at]').forEach(function (node) { node.textContent = formatDuration((Date.now() - Date.parse(node.dataset.startedAt)) / 1000); });
@@ -444,7 +450,7 @@
         setTimeout(function () { byId('copyButton').textContent = 'Copy access link'; }, 1600);
       }).catch(function () { setNotice('Copy was blocked; use the URL in the browser address bar.'); });
     });
-    setConnectPanel(!state.token);
+    setConnectPanel(!state.token && !state.localAccess);
     requestSnapshot().then(connectEvents);
   }
 
