@@ -33,6 +33,14 @@
     return originOf(configuredEndpoint() || window.location.origin) || window.location.origin;
   }
 
+  function deployedShellUrl() {
+    var meta = document.querySelector('meta[name="codex-monitor-deploy-url"]');
+    var configured = window.CODEX_MONITOR_DEPLOY_URL || (meta && meta.getAttribute('content')) || '';
+    var parsed = browserUrl(configured);
+    if (!parsed) return window.location.origin + window.location.pathname;
+    return parsed.origin + (parsed.pathname || '/');
+  }
+
   function tokenStorageKey(endpoint) {
     return 'codex-live-wall-token:' + String(endpoint || window.location.origin);
   }
@@ -392,7 +400,7 @@
   function buildAccessLink() {
     var fragment = 'token=' + encodeURIComponent(state.token);
     if (state.endpoint && state.endpoint !== window.location.origin) fragment += '&endpoint=' + encodeURIComponent(state.endpoint);
-    return window.location.origin + window.location.pathname + '#' + fragment;
+    return deployedShellUrl() + '#' + fragment;
   }
 
   function connectFromInput() {
