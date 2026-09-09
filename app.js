@@ -18,6 +18,7 @@
   }
 
   function originOf(value) {
+    if (!value || !String(value).trim()) return '';
     var parsed = browserUrl(value);
     if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) return '';
     return parsed.origin;
