@@ -24,8 +24,37 @@
     return parsed.origin;
   }
 
+  function configuredEndpoint() {
+    var meta = document.querySelector('meta[name="codex-monitor-endpoint"]');
+    return window.CODEX_MONITOR_ENDPOINT || (meta && meta.getAttribute('content')) || '';
+  }
+
   function defaultEndpoint() {
-    return originOf(window.CODEX_MONITOR_ENDPOINT || window.location.origin) || window.location.origin;
+    return originOf(configuredEndpoint() || window.location.origin) || window.location.origin;
+  }
+
+  function tokenStorageKey(endpoint) {
+    return 'codex-live-wall-token:' + String(endpoint || window.location.origin);
+  }
+
+  function readSavedToken(endpoint) {
+    try {
+      return window.localStorage ? (window.localStorage.getItem(tokenStorageKey(endpoint)) || '') : '';
+    } catch (error) {
+      return '';
+    }
+  }
+
+  function saveToken(endpoint, token) {
+    try {
+      if (window.localStorage && token) window.localStorage.setItem(tokenStorageKey(endpoint), token);
+    } catch (error) {}
+  }
+
+  function forgetToken(endpoint) {
+    try {
+      if (window.localStorage) window.localStorage.removeItem(tokenStorageKey(endpoint));
+    } catch (error) {}
   }
 
   function parseAccessLink(value) {
@@ -297,7 +326,14 @@
     }
     return fetch(apiUrl('/api/snapshot'), { headers: { Authorization: 'Bearer ' + state.token }, cache: 'no-store' })
       .then(function (response) {
-        if (!response.ok) throw new Error('snapshot HTTP ' + response.status);
+        if (!response.ok) {
+          if (response.status === 401) {
+            forgetToken(state.endpoint);
+            state.token = '';
+            setConnectPanel(true);
+          }
+          throw new Error('snapshot HTTP ' + response.status);
+        }
         return response.json();
       })
       .then(function (snapshot) {
@@ -348,9 +384,8 @@
 
   function updateUrlToken() {
     if (!state.token) return;
-    var fragment = 'token=' + encodeURIComponent(state.token);
-    if (state.endpoint && state.endpoint !== window.location.origin) fragment += '&endpoint=' + encodeURIComponent(state.endpoint);
-    var cleanUrl = window.location.origin + window.location.pathname + '#' + fragment;
+    saveToken(state.endpoint, state.token);
+    var cleanUrl = window.location.origin + window.location.pathname;
     if (window.history && window.history.replaceState) window.history.replaceState({}, '', cleanUrl);
   }
 
@@ -378,7 +413,7 @@
   function setup() {
     var initial = parseAccessLink(window.location.href) || { endpoint: defaultEndpoint(), token: '' };
     state.endpoint = initial.endpoint;
-    state.token = initial.token;
+    state.token = initial.token || readSavedToken(state.endpoint);
     if (state.token) updateUrlToken();
     setInterval(function () {
       document.querySelectorAll('[data-activity-at]').forEach(function (node) { node.textContent = formatAge((Date.now() - Date.parse(node.dataset.activityAt)) / 1000); });
