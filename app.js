@@ -29,6 +29,11 @@
     return window.CODEX_MONITOR_ENDPOINT || (meta && meta.getAttribute('content')) || '';
   }
 
+  function configuredShareEndpoint() {
+    var meta = document.querySelector('meta[name="codex-monitor-share-endpoint"]');
+    return window.CODEX_MONITOR_SHARE_ENDPOINT || (meta && meta.getAttribute('content')) || '';
+  }
+
   function defaultEndpoint() {
     return originOf(configuredEndpoint() || window.location.origin) || window.location.origin;
   }
@@ -399,7 +404,8 @@
 
   function buildAccessLink() {
     var fragment = 'token=' + encodeURIComponent(state.token);
-    if (state.endpoint && state.endpoint !== window.location.origin) fragment += '&endpoint=' + encodeURIComponent(state.endpoint);
+    var shareEndpoint = originOf(configuredShareEndpoint()) || state.endpoint;
+    if (shareEndpoint && shareEndpoint !== window.location.origin) fragment += '&endpoint=' + encodeURIComponent(shareEndpoint);
     return deployedShellUrl() + '#' + fragment;
   }
 
