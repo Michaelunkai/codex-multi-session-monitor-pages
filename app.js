@@ -629,16 +629,26 @@
     return true;
   }
 
+  function revealLatestTranscript(card) {
+    var scroll = card && card.querySelector('.transcript-scroll');
+    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+  }
+
   function syncCardOrder() {
     var container = byId('cards');
     var sessions = filteredSessions();
     var visibleIds = new Set(sessions.map(function (session) { return String(session.id); }));
     sessions.forEach(function (session, index) {
       var card = cardForSession(session.id);
-      if (!card) card = renderCard(session, index, null);
+      var created = false;
+      if (!card) {
+        card = renderCard(session, index, null);
+        created = true;
+      }
       var number = card.querySelector('.card-number');
       if (number) number.textContent = '#' + String(index + 1).padStart(2, '0');
       container.appendChild(card);
+      if (created) revealLatestTranscript(card);
     });
     Array.prototype.forEach.call(container.querySelectorAll('article'), function (card) {
       if (!visibleIds.has(String(card.dataset.sessionId))) card.remove();
@@ -679,6 +689,8 @@
       var scroll = card.querySelector('.transcript-scroll');
       if (previous && scroll) {
         scroll.scrollTop = previous.atBottom ? scroll.scrollHeight : previous.top;
+      } else {
+        revealLatestTranscript(card);
       }
     });
     empty.classList.toggle('hidden', sessions.length !== 0);
