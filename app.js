@@ -210,11 +210,12 @@
 
   function entryLabel(entry) {
     var type = text(entry && entry.type, 'output');
-    if (type === 'assistant' || type === 'AgentMessage') return 'Codex output';
-    if (type === 'assistant-delta') return 'Codex output · streaming';
-    if (type === 'CommandExecution') return 'Command output';
-    if (type === 'command-delta') return 'Command output · streaming';
-    if (type === 'custom_tool_call_output') return 'Tool output';
+    var normalized = type.toLowerCase();
+    if (normalized === 'assistant' || normalized === 'agentmessage') return 'Codex output · live';
+    if (normalized === 'assistant-delta') return 'Codex output · streaming';
+    if (normalized === 'commandexecution') return 'Command output';
+    if (normalized === 'command-delta') return 'Command output · streaming';
+    if (normalized === 'custom_tool_call_output') return 'Tool output';
     return type;
   }
 
@@ -241,7 +242,8 @@
     panel.setAttribute('aria-label', 'Live output for ' + text(session.title, 'Codex session'));
     var heading = make('div', 'transcript-heading');
     heading.appendChild(make('span', 'transcript-title', 'LIVE OUTPUT'));
-    heading.appendChild(make('span', 'transcript-state', 'committed Codex events'));
+    var direct = session.liveTransport === 'codex-ipc';
+    heading.appendChild(make('span', 'transcript-state', direct ? 'DIRECT FROM DESKTOP · updating now' : 'read-only fallback · waiting for direct stream'));
     panel.appendChild(heading);
     var scroll = make('div', 'transcript-scroll');
     scroll.setAttribute('role', 'log');

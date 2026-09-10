@@ -9,7 +9,7 @@
   <meta name="codex-monitor-share-endpoint" content="https://codex-monitor.tail5cbd67.ts.net">
   <meta name="codex-monitor-deploy-url" content="https://michaelunkai.github.io/codex-multi-session-monitor-pages/">
   <title>Codex Live Wall</title>
-  <link rel="stylesheet" href="styles.css?v=2.1.0">
+  <link rel="stylesheet" href="styles.css?v=2.2.0">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -19,7 +19,7 @@
       <div>
         <p class="eyebrow">CODEX DESKTOP / RUNNING ONLY</p>
         <h1>Live wall</h1>
-        <p class="lede">Every card below is a currently unfinished session with a fresh local rollout event. Completed and stale history is never shown here.</p>
+        <p class="lede">Every card below is an in-progress Codex Desktop turn. The wall follows the official local live stream directly and keeps completed or stale history out.</p>
       </div>
       <div class="hero-actions">
         <span id="connectionBadge" class="connection-badge connection-unknown">Connecting</span>
@@ -79,14 +79,14 @@
         <span class="live-dot"></span>
         <span id="lastUpdate">Waiting for first live snapshot</span>
       </div>
-      <span id="sourceSummary">Read-only rollout telemetry</span>
+      <span id="sourceSummary">Codex Desktop live stream</span>
     </section>
 
     <section id="cards" class="card-grid" aria-live="polite" aria-label="Currently running Codex sessions"></section>
     <section id="emptyState" class="empty-state hidden">
       <div class="empty-icon">◌</div>
       <h2>No currently running sessions</h2>
-      <p>Only fresh unfinished Codex rollouts appear. This wall intentionally hides completed and stale history.</p>
+      <p>Only currently in-progress Codex Desktop turns appear. This wall intentionally hides completed and stale history.</p>
     </section>
 
     <footer class="footer">
@@ -94,6 +94,6 @@
       <span id="footerVersion">Monitor —</span>
     </footer>
   </main>
-  <script src="app.js?v=2.1.0" defer></script>
+  <script src="app.js?v=2.2.0" defer></script>
 </body>
 </html>
