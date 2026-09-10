@@ -15,6 +15,8 @@
     localProbePromise: null,
     localFirst: false,
     lastLocalEndpoint: '',
+    copyTokenPromise: null,
+    copyReady: false,
     snapshotRequestPromise: null,
     snapshotRefreshQueued: false
   };
@@ -176,6 +178,7 @@
           setConnectPanel(false);
           setConnection('Live · this PC', 'connection-live');
           setNotice('');
+          accessTokenForCopy().catch(function () {});
           return true;
         })
         .catch(function () {
@@ -208,6 +211,28 @@
     }
     notice.textContent = message;
     notice.classList.remove('hidden');
+  }
+
+  function setCopyStatus(message, tone) {
+    var status = byId('copyStatus');
+    if (!status) return;
+    status.textContent = message || '';
+    status.className = 'copy-status' + (tone ? ' copy-status-' + tone : '');
+  }
+
+  function markCopyReady() {
+    state.copyReady = true;
+    setCopyStatus('Ready for Android · one tap copies the private link', 'ready');
+  }
+
+  function markCopyWaiting(message) {
+    state.copyReady = false;
+    setCopyStatus(message || 'Preparing private Android link…', 'waiting');
+  }
+
+  function markCopyUnavailable(message) {
+    state.copyReady = false;
+    setCopyStatus(message || 'Private link unavailable', 'error');
   }
 
   function setConnectPanel(visible) {
@@ -365,6 +390,7 @@
     } else {
       setNotice('');
     }
+    renderSessionIndex();
   }
 
   function matchesSearch(session) {
@@ -377,6 +403,61 @@
     return ((state.snapshot && state.snapshot.sessions) || []).filter(function (session) {
       return session.status === 'RUNNING' && matchesSearch(session);
     });
+  }
+
+  function previewText(value, limit) {
+    var result = text(value, '').replace(/\s+/g, ' ').trim();
+    if (!result) return 'No user-visible output committed yet.';
+    var max = limit || 220;
+    return result.length > max ? result.slice(0, max - 1) + '…' : result;
+  }
+
+  function latestOutputPreview(session) {
+    var entries = Array.isArray(session && session.liveOutput) ? session.liveOutput : [];
+    for (var index = entries.length - 1; index >= 0; index -= 1) {
+      if (entries[index] && text(entries[index].text, '').trim()) return previewText(entries[index].text, 240);
+    }
+    var latest = session && session.latestItem;
+    return previewText(latest && (latest.text || latest.preview), 240);
+  }
+
+  function renderSessionIndex() {
+    var container = byId('sessionIndex');
+    if (!container) return;
+    var sessions = filteredSessions();
+    container.textContent = '';
+    sessions.forEach(function (session, index) {
+      var row = make('article', 'session-index-row');
+      row.dataset.indexSessionId = session.id;
+      row.setAttribute('role', 'listitem');
+
+      row.appendChild(make('span', 'session-index-number', '#' + String(index + 1).padStart(2, '0')));
+
+      var identity = make('div', 'session-index-identity');
+      var titleLine = make('div', 'session-index-title-line');
+      titleLine.appendChild(make('span', 'session-index-status-dot', '●'));
+      titleLine.appendChild(make('strong', 'session-index-title', text(session.title, 'Untitled Codex session')));
+      identity.appendChild(titleLine);
+      identity.appendChild(make('div', 'session-index-subtitle', text(session.project, 'Unknown project') + ' · ' + text(session.model, 'model unknown')));
+      row.appendChild(identity);
+
+      var activity = session.activity || {};
+      var activityCell = make('div', 'session-index-activity');
+      activityCell.appendChild(make('span', 'session-index-label', 'NOW'));
+      activityCell.appendChild(make('strong', '', text(activity.label, 'Codex is working')));
+      activityCell.appendChild(make('span', 'session-index-age', formatAge(session.activityAgeSeconds !== undefined ? session.activityAgeSeconds : session.lastActivityAgeSeconds)));
+      row.appendChild(activityCell);
+
+      var preview = make('div', 'session-index-preview');
+      preview.appendChild(make('span', 'session-index-label', 'LATEST OUTPUT'));
+      preview.appendChild(make('span', '', latestOutputPreview(session)));
+      row.appendChild(preview);
+      container.appendChild(row);
+    });
+    var meta = byId('sessionIndexMeta');
+    if (meta) meta.textContent = sessions.length + ' live · sorted by latest event';
+    var feedCount = byId('feedCount');
+    if (feedCount) feedCount.textContent = sessions.length + ' live transcript' + (sessions.length === 1 ? '' : 's');
   }
 
   function make(tag, className, content) {
@@ -694,6 +775,7 @@
       }
     });
     empty.classList.toggle('hidden', sessions.length !== 0);
+    renderSessionIndex();
   }
 
   function render(snapshot) {
@@ -742,6 +824,7 @@
         render(failClosedSnapshot(snapshot));
         setConnectPanel(false);
         setConnection(snapshot.source === 'synthetic-test' ? 'Test fixture' : (state.localAccess ? 'Live · this PC' : 'Live'), 'connection-live');
+        if (state.localAccess || state.token) accessTokenForCopy().catch(function () {});
       })
       .catch(function (error) {
         if (probingLocal) {
@@ -857,9 +940,17 @@
   }
 
   function accessTokenForCopy() {
-    if (state.token) return Promise.resolve(state.token);
-    if (!state.localAccess) return Promise.reject(new Error('No private access token is available on this connection.'));
-    return fetch(apiUrl('/api/access-link'), { cache: 'no-store', mode: 'cors', targetAddressSpace: 'loopback' })
+    if (state.token) {
+      markCopyReady();
+      return Promise.resolve(state.token);
+    }
+    if (!state.localAccess) {
+      markCopyUnavailable('Connect this wall to the PC before copying');
+      return Promise.reject(new Error('No private access token is available on this connection.'));
+    }
+    if (state.copyTokenPromise) return state.copyTokenPromise;
+    markCopyWaiting('Preparing private Android link…');
+    state.copyTokenPromise = fetch(apiUrl('/api/access-link'), { cache: 'no-store', mode: 'cors', targetAddressSpace: 'loopback' })
       .then(function (response) {
         if (!response.ok) throw new Error('local access-link HTTP ' + response.status);
         return response.json();
@@ -868,8 +959,15 @@
         if (!payload || typeof payload.token !== 'string' || payload.token.length < 32) throw new Error('local access-link response was invalid');
         state.token = payload.token;
         saveToken(originOf(configuredShareEndpoint()) || state.endpoint, state.token);
+        markCopyReady();
         return state.token;
-      });
+      })
+      .catch(function (error) {
+        markCopyUnavailable('Private link is not ready yet');
+        throw error;
+      })
+      .finally(function () { state.copyTokenPromise = null; });
+    return state.copyTokenPromise;
   }
 
   function fallbackCopyText(value) {
@@ -902,6 +1000,7 @@
     }
     state.endpoint = parsed.endpoint;
     state.token = parsed.token;
+    markCopyReady();
     state.localAccess = originOf(state.endpoint) === window.location.origin;
     state.localProbe = false;
     updateUrlToken();
@@ -925,18 +1024,34 @@
     byId('searchInput').addEventListener('input', function (event) { state.search = event.target.value.toLowerCase().trim(); renderCards(); });
     byId('refreshButton').addEventListener('click', requestSnapshot);
     if (byId('connectButton')) byId('connectButton').addEventListener('click', connectFromInput);
+    if (explicitToken) markCopyReady();
+    else markCopyWaiting('Preparing private Android link…');
     byId('copyButton').addEventListener('click', function () {
       var button = byId('copyButton');
+      if (!state.token) {
+        button.textContent = 'Preparing link…';
+        accessTokenForCopy().then(function () {
+          button.textContent = 'Copy access link';
+          setCopyStatus('Ready — tap Copy access link now', 'ready');
+        }).catch(function () {
+          button.textContent = 'Copy access link';
+        });
+        return;
+      }
+      // Do not await network work in the click handler. The token is prepared
+      // while the connection is established, preserving browser click
+      // activation for navigator.clipboard.writeText and the fallback.
+      var link = buildAccessLink();
       button.disabled = true;
-      button.textContent = 'Preparing link…';
-      accessTokenForCopy().then(function () {
-        return copyText(buildAccessLink());
-      }).then(function () {
+      button.textContent = 'Copying…';
+      copyText(link).then(function () {
         button.textContent = 'Copied';
-        setTimeout(function () { button.textContent = 'Copy access link'; button.disabled = false; }, 1600);
+        setCopyStatus('Copied for Android · link is ready to paste', 'ready');
+        setTimeout(function () { button.textContent = 'Copy access link'; button.disabled = false; }, 1800);
       }).catch(function (error) {
         button.textContent = 'Copy access link';
         button.disabled = false;
+        markCopyUnavailable('Clipboard was blocked — allow clipboard access and retry');
         setNotice('Could not copy the private access link: ' + error.message);
       });
     });

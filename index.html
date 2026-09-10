@@ -9,7 +9,7 @@
   <meta name="codex-monitor-share-endpoint" content="https://codex-monitor.tail5cbd67.ts.net">
   <meta name="codex-monitor-deploy-url" content="https://michaelunkai.github.io/codex-multi-session-monitor-pages/">
   <title>Codex Live Wall</title>
-  <link rel="stylesheet" href="styles.css?v=2.5.8">
+  <link rel="stylesheet" href="styles.css?v=2.6.0">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -24,7 +24,8 @@
       <div class="hero-actions">
         <span id="connectionBadge" class="connection-badge connection-unknown">Connecting</span>
         <button id="refreshButton" class="button button-ghost" type="button">Refresh</button>
-        <button id="copyButton" class="button button-primary" type="button">Copy access link</button>
+        <button id="copyButton" class="button button-primary" type="button" title="Copy a private one-tap link for Android or another device">Copy access link</button>
+        <span id="copyStatus" class="copy-status" aria-live="polite">Preparing private Android link…</span>
       </div>
     </header>
 
@@ -82,6 +83,25 @@
       <span id="sourceSummary">Codex Desktop live stream</span>
     </section>
 
+    <section class="overview-panel" aria-label="All currently running Codex sessions">
+      <div class="section-heading">
+        <div>
+          <p class="section-label">ALL RUNNING SESSIONS</p>
+          <h2>Live session index</h2>
+        </div>
+        <span id="sessionIndexMeta" class="section-meta">Sorted by latest event</span>
+      </div>
+      <div id="sessionIndex" class="session-index" role="list" aria-live="polite"></div>
+    </section>
+
+    <div class="feed-heading" aria-label="Live transcript feeds">
+      <div>
+        <p class="section-label">VERBATIM LIVE OUTPUT</p>
+        <h2>Every session, continuously</h2>
+      </div>
+      <span id="feedCount" class="section-meta">—</span>
+    </div>
+
     <section id="cards" class="card-grid" aria-live="polite" aria-label="Currently running Codex sessions"></section>
     <section id="emptyState" class="empty-state hidden">
       <div class="empty-icon">◌</div>
@@ -94,6 +114,6 @@
       <span id="footerVersion">Monitor —</span>
     </footer>
   </main>
-  <script src="app.js?v=2.5.8" defer></script>
+  <script src="app.js?v=2.6.0" defer></script>
 </body>
 </html>
