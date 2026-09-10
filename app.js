@@ -5,6 +5,7 @@
     token: '',
     endpoint: '',
     localAccess: false,
+    localProbe: false,
     snapshot: null,
     search: '',
     eventSource: null,
@@ -33,6 +34,11 @@
   function configuredShareEndpoint() {
     var meta = document.querySelector('meta[name="codex-monitor-share-endpoint"]');
     return window.CODEX_MONITOR_SHARE_ENDPOINT || (meta && meta.getAttribute('content')) || '';
+  }
+
+  function configuredLocalEndpoint() {
+    var meta = document.querySelector('meta[name="codex-monitor-local-endpoint"]');
+    return window.CODEX_MONITOR_LOCAL_ENDPOINT || (meta && meta.getAttribute('content')) || '';
   }
 
   function defaultEndpoint() {
@@ -340,6 +346,12 @@
     }
     var requestOptions = { cache: 'no-store' };
     if (state.token && !state.localAccess) requestOptions.headers = { Authorization: 'Bearer ' + state.token };
+    if (state.localProbe && window.AbortController) {
+      var controller = new window.AbortController();
+      requestOptions.signal = controller.signal;
+      setTimeout(function () { controller.abort(); }, 2500);
+    }
+    var probingLocal = state.localProbe;
     return fetch(apiUrl('/api/snapshot'), requestOptions)
       .then(function (response) {
         if (!response.ok) {
@@ -347,6 +359,9 @@
             forgetToken(state.endpoint);
             state.token = '';
             state.localAccess = false;
+            state.localProbe = false;
+            if (probingLocal) state.endpoint = defaultEndpoint();
+            setConnection('Token needed', 'connection-reconnecting');
             setConnectPanel(true);
           }
           throw new Error('snapshot HTTP ' + response.status);
@@ -354,11 +369,27 @@
         return response.json();
       })
       .then(function (snapshot) {
+        state.localProbe = false;
         render(failClosedSnapshot(snapshot));
         setConnectPanel(false);
         setConnection(snapshot.source === 'synthetic-test' ? 'Test fixture' : (state.localAccess ? 'Live · this PC' : 'Live'), 'connection-live');
       })
       .catch(function (error) {
+        if (probingLocal) {
+          state.localProbe = false;
+          state.localAccess = false;
+          state.endpoint = defaultEndpoint();
+          setConnection('Token needed', 'connection-reconnecting');
+          setConnectPanel(true);
+          setNotice('This page is not connected to the monitor PC. Paste the private access URL for this machine.');
+          return;
+        }
+        if (error && error.message === 'snapshot HTTP 401') {
+          setConnection('Token needed', 'connection-reconnecting');
+          setConnectPanel(true);
+          setNotice('Paste the complete private PC access URL below. It contains the bearer token in the URL fragment and is not sent to the hosting service.');
+          return;
+        }
         setConnection('Reconnecting', 'connection-reconnecting');
         setNotice('Dashboard connection lost: ' + error.message);
       });
@@ -423,6 +454,7 @@
     state.endpoint = parsed.endpoint;
     state.token = parsed.token;
     state.localAccess = originOf(state.endpoint) === window.location.origin;
+    state.localProbe = false;
     updateUrlToken();
     if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
     if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
@@ -434,6 +466,14 @@
     state.endpoint = initial.endpoint;
     state.token = initial.token || readSavedToken(state.endpoint);
     state.localAccess = originOf(state.endpoint) === window.location.origin;
+    if (!state.token && !state.localAccess) {
+      var localEndpoint = originOf(configuredLocalEndpoint());
+      if (localEndpoint && localEndpoint !== state.endpoint) {
+        state.endpoint = localEndpoint;
+        state.localAccess = true;
+        state.localProbe = true;
+      }
+    }
     if (state.token && !state.localAccess) updateUrlToken();
     setInterval(function () {
       document.querySelectorAll('[data-activity-at]').forEach(function (node) { node.textContent = formatAge((Date.now() - Date.parse(node.dataset.activityAt)) / 1000); });
