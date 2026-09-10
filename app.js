@@ -96,6 +96,54 @@
     return parsed.toString();
   }
 
+  function localEndpointCandidates() {
+    var candidates = [];
+    var configuredLocal = configuredLocalEndpoint();
+    if (!configuredLocal) return candidates;
+    function add(value) {
+      var origin = originOf(value);
+      if (origin && candidates.indexOf(origin) < 0) candidates.push(origin);
+    }
+    add(configuredLocal);
+    for (var port = 8765; port <= 8800; port += 1) add('http://127.0.0.1:' + port);
+    return candidates;
+  }
+
+  function probeLocalEndpoint() {
+    var candidates = localEndpointCandidates();
+    var index = 0;
+    function attempt() {
+      if (index >= candidates.length) {
+        state.localProbe = false;
+        state.localAccess = false;
+        state.endpoint = defaultEndpoint();
+        setConnection('Token needed', 'connection-reconnecting');
+        setConnectPanel(true);
+        setNotice('This page is not connected to the monitor PC. Paste the private access URL for another machine.');
+        return Promise.resolve(false);
+      }
+      state.endpoint = candidates[index++];
+      state.localAccess = true;
+      state.localProbe = true;
+      var requestOptions = { cache: 'no-store', targetAddressSpace: 'loopback' };
+      return fetch(apiUrl('/api/snapshot'), requestOptions)
+        .then(function (response) {
+          if (!response.ok) throw new Error('local probe HTTP ' + response.status);
+          return response.json();
+        })
+        .then(function (snapshot) {
+          state.localProbe = false;
+          render(failClosedSnapshot(snapshot));
+          setConnectPanel(false);
+          setConnection('Live · this PC', 'connection-live');
+          setNotice('');
+          return true;
+        })
+        .catch(function () { return attempt(); });
+    }
+    return attempt();
+  }
+
   function setConnection(label, className) {
     var badge = byId('connectionBadge');
     badge.textContent = label;
@@ -489,14 +537,6 @@
     state.endpoint = initial.endpoint;
     state.token = initial.token || readSavedToken(state.endpoint);
     state.localAccess = originOf(state.endpoint) === window.location.origin;
-    if (!state.token && !state.localAccess) {
-      var localEndpoint = originOf(configuredLocalEndpoint());
-      if (localEndpoint && localEndpoint !== state.endpoint) {
-        state.endpoint = localEndpoint;
-        state.localAccess = true;
-        state.localProbe = true;
-      }
-    }
     if (state.token && !state.localAccess) updateUrlToken();
     setInterval(function () {
       document.querySelectorAll('[data-activity-at]').forEach(function (node) { node.textContent = formatAge((Date.now() - Date.parse(node.dataset.activityAt)) / 1000); });
@@ -514,7 +554,11 @@
       }).catch(function () { setNotice('Copy was blocked; use the URL in the browser address bar.'); });
     });
     setConnectPanel(!state.token && !state.localAccess);
-    requestSnapshot().then(connectEvents);
+    if (!state.token && !state.localAccess) {
+      probeLocalEndpoint().then(function (connected) { if (connected) connectEvents(); });
+    } else {
+      requestSnapshot().then(connectEvents);
+    }
   }
 
   document.addEventListener('DOMContentLoaded', setup);
