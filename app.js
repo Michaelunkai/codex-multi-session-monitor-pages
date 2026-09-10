@@ -844,6 +844,43 @@
     return deployedShellUrl() + '#' + fragment;
   }
 
+  function accessTokenForCopy() {
+    if (state.token) return Promise.resolve(state.token);
+    if (!state.localAccess) return Promise.reject(new Error('No private access token is available on this connection.'));
+    return fetch(apiUrl('/api/access-link'), { cache: 'no-store', mode: 'cors', targetAddressSpace: 'loopback' })
+      .then(function (response) {
+        if (!response.ok) throw new Error('local access-link HTTP ' + response.status);
+        return response.json();
+      })
+      .then(function (payload) {
+        if (!payload || typeof payload.token !== 'string' || payload.token.length < 32) throw new Error('local access-link response was invalid');
+        state.token = payload.token;
+        saveToken(originOf(configuredShareEndpoint()) || state.endpoint, state.token);
+        return state.token;
+      });
+  }
+
+  function fallbackCopyText(value) {
+    var area = document.createElement('textarea');
+    area.value = value;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    var copied = false;
+    try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
+    area.remove();
+    return copied ? Promise.resolve() : Promise.reject(new Error('clipboard access was blocked'));
+  }
+
+  function copyText(value) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      return navigator.clipboard.writeText(value).catch(function () { return fallbackCopyText(value); });
+    }
+    return fallbackCopyText(value);
+  }
+
   function connectFromInput() {
     var input = byId('accessInput');
     var parsed = parseAccessLink(input && input.value);
@@ -877,12 +914,19 @@
     byId('refreshButton').addEventListener('click', requestSnapshot);
     if (byId('connectButton')) byId('connectButton').addEventListener('click', connectFromInput);
     byId('copyButton').addEventListener('click', function () {
-      if (!state.token) return;
-      var link = buildAccessLink();
-      navigator.clipboard.writeText(link).then(function () {
-        byId('copyButton').textContent = 'Copied';
-        setTimeout(function () { byId('copyButton').textContent = 'Copy access link'; }, 1600);
-      }).catch(function () { setNotice('Copy was blocked; use the URL in the browser address bar.'); });
+      var button = byId('copyButton');
+      button.disabled = true;
+      button.textContent = 'Preparing link…';
+      accessTokenForCopy().then(function () {
+        return copyText(buildAccessLink());
+      }).then(function () {
+        button.textContent = 'Copied';
+        setTimeout(function () { button.textContent = 'Copy access link'; button.disabled = false; }, 1600);
+      }).catch(function (error) {
+        button.textContent = 'Copy access link';
+        button.disabled = false;
+        setNotice('Could not copy the private access link: ' + error.message);
+      });
     });
     setConnectPanel(false);
     // A browser on the PC may have a previously saved remote token. The local
