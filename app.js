@@ -211,9 +211,29 @@
   function entryLabel(entry) {
     var type = text(entry && entry.type, 'output');
     if (type === 'assistant' || type === 'AgentMessage') return 'Codex output';
+    if (type === 'assistant-delta') return 'Codex output · streaming';
     if (type === 'CommandExecution') return 'Command output';
+    if (type === 'command-delta') return 'Command output · streaming';
     if (type === 'custom_tool_call_output') return 'Tool output';
     return type;
+  }
+
+  function renderActivity(session) {
+    var activity = session.activity || {};
+    var panel = make('div', 'live-activity');
+    panel.setAttribute('aria-live', 'polite');
+    var heading = make('div', 'live-activity-heading');
+    heading.appendChild(make('span', 'live-activity-title', 'LIVE ACTIVITY'));
+    var age = make('span', 'live-activity-age', formatAge(session.activityAgeSeconds !== undefined ? session.activityAgeSeconds : session.lastActivityAgeSeconds));
+    if (activity.at) age.dataset.activityAt = activity.at;
+    heading.appendChild(age);
+    panel.appendChild(heading);
+    var body = make('div', 'live-activity-body');
+    body.appendChild(make('span', 'live-activity-pulse', '●'));
+    body.appendChild(make('strong', 'live-activity-label', text(activity.label, 'Codex is working')));
+    panel.appendChild(body);
+    if (activity.detail) panel.appendChild(make('div', 'live-activity-detail', activity.detail));
+    return panel;
   }
 
   function renderTranscript(session) {
@@ -221,7 +241,7 @@
     panel.setAttribute('aria-label', 'Live output for ' + text(session.title, 'Codex session'));
     var heading = make('div', 'transcript-heading');
     heading.appendChild(make('span', 'transcript-title', 'LIVE OUTPUT'));
-    heading.appendChild(make('span', 'transcript-state', 'durable local events'));
+    heading.appendChild(make('span', 'transcript-state', 'committed Codex events'));
     panel.appendChild(heading);
     var scroll = make('div', 'transcript-scroll');
     scroll.setAttribute('role', 'log');
@@ -264,6 +284,7 @@
     chips.appendChild(make('span', 'chip', text(session.project, 'Unknown project')));
     if (session.model && session.model !== 'unknown') chips.appendChild(make('span', 'chip', session.model));
     card.appendChild(chips);
+    card.appendChild(renderActivity(session));
     card.appendChild(renderTranscript(session));
 
     var metrics = make('div', 'metric-row');

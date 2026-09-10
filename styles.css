@@ -77,6 +77,15 @@ h1 { margin: 0; font-size: clamp(2.1rem, 4vw, 4.7rem); line-height: .95; letter-
 .chip-row { display: flex; flex-wrap: wrap; gap: 7px; margin: 13px 0 0; }
 .chip { max-width: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: 999px; padding: 5px 8px; color: var(--muted); background: rgba(5, 15, 26, .42); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 
+.live-activity { margin-top: 13px; border: 1px solid rgba(255, 190, 104, .38); border-radius: 13px; padding: 10px 11px; background: rgba(84, 52, 23, .24); }
+.live-activity-heading { display: flex; justify-content: space-between; gap: 8px; color: var(--faint); font-size: .64rem; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+.live-activity-title { color: var(--accent-hot); }
+.live-activity-age { white-space: nowrap; }
+.live-activity-body { display: flex; align-items: center; gap: 8px; margin-top: 7px; color: var(--text); font-size: .86rem; line-height: 1.3; }
+.live-activity-pulse { color: var(--accent-hot); font-size: .72rem; animation: pulse 1.1s ease-in-out infinite; }
+.live-activity-label { overflow-wrap: anywhere; }
+.live-activity-detail { margin: 6px 0 0 17px; color: var(--muted); font: 500 .72rem/1.35 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; overflow-wrap: anywhere; }
+
 .live-transcript { display: flex; flex-direction: column; min-height: 390px; margin-top: 16px; overflow: hidden; border: 1px solid rgba(104, 211, 178, .25); border-radius: 16px; background: #020912; }
 .transcript-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; border-bottom: 1px solid rgba(177, 213, 239, .12); padding: 10px 12px; background: rgba(16, 42, 58, .62); }
 .transcript-title { color: var(--accent); font-size: .68rem; font-weight: 900; letter-spacing: .12em; }
@@ -130,8 +139,8 @@ summary { color: var(--muted); cursor: pointer; font-size: .76rem; font-weight: 
   .status-strip > span, .footer > span { display: block; margin-top: 7px; }
   .card-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .session-card { padding: 14px; border-radius: 17px; }
-  .live-transcript { min-height: 330px; }
-  .transcript-scroll { min-height: 270px; max-height: 52vh; }
+  .live-transcript { min-height: 390px; }
+  .transcript-scroll { min-height: 330px; max-height: 60vh; }
   .transcript-text { font-size: .72rem; }
   .metric-row { gap: 7px; }
   .metric-value { font-size: .74rem; }
