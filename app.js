@@ -872,8 +872,10 @@
         setTimeout(function () { byId('copyButton').textContent = 'Copy access link'; }, 1600);
       }).catch(function () { setNotice('Copy was blocked; use the URL in the browser address bar.'); });
     });
-    setConnectPanel(!state.token && !state.localAccess);
+    setConnectPanel(false);
     if (!state.token && !state.localAccess) {
+      setConnection('Looking for this PC', 'connection-reconnecting');
+      setNotice('Connecting to this PC automatically.');
       probeLocalEndpoint().then(function (connected) { if (connected) connectEvents(); });
     } else {
       requestSnapshot().then(connectEvents);
