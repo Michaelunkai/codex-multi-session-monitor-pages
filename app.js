@@ -13,6 +13,7 @@
     pollTimer: null,
     localRetryTimer: null,
     localProbePromise: null,
+    localFirst: false,
     lastLocalEndpoint: '',
     snapshotRequestPromise: null,
     snapshotRefreshQueued: false
@@ -119,7 +120,8 @@
   }
 
   function scheduleLocalProbe(delay) {
-    if (state.token || state.localRetryTimer) return;
+    if ((!state.localFirst && !(state.localAccess && !state.token)) || state.localRetryTimer) return;
+    state.localFirst = true;
     state.localRetryTimer = setTimeout(function () {
       state.localRetryTimer = null;
       probeLocalEndpoint().then(function (connected) {
@@ -128,9 +130,16 @@
     }, delay || 2500);
   }
 
-  function probeLocalEndpoint() {
+  function cancelLocalProbeRetry() {
+    if (!state.localRetryTimer) return;
+    clearTimeout(state.localRetryTimer);
+    state.localRetryTimer = null;
+  }
+
+  function probeLocalEndpoint(quickOnly) {
     if (state.localProbePromise) return state.localProbePromise;
     var candidates = localEndpointCandidates();
+    if (quickOnly) candidates = candidates.slice(0, 1);
     var index = 0;
     function attempt() {
       if (index >= candidates.length) {
@@ -162,6 +171,7 @@
         .then(function (snapshot) {
           state.localProbe = false;
           state.lastLocalEndpoint = state.endpoint;
+          state.localFirst = false;
           render(failClosedSnapshot(snapshot));
           setConnectPanel(false);
           setConnection('Live · this PC', 'connection-live');
@@ -853,8 +863,10 @@
 
   function setup() {
     var initial = parseAccessLink(window.location.href) || { endpoint: defaultEndpoint(), token: '' };
+    var explicitToken = initial.token || '';
     state.endpoint = initial.endpoint;
-    state.token = initial.token || readSavedToken(state.endpoint);
+    var savedRemoteToken = explicitToken || readSavedToken(state.endpoint);
+    state.token = explicitToken;
     state.localAccess = originOf(state.endpoint) === window.location.origin;
     if (state.token && !state.localAccess) updateUrlToken();
     setInterval(function () {
@@ -873,7 +885,29 @@
       }).catch(function () { setNotice('Copy was blocked; use the URL in the browser address bar.'); });
     });
     setConnectPanel(false);
-    if (!state.token && !state.localAccess) {
+    // A browser on the PC may have a previously saved remote token. The local
+    // monitor is still the authoritative default there, so make one quick
+    // local attempt before using that token. Explicit access URLs continue to
+    // mean exactly what the user asked for and skip the local-first branch.
+    if (!explicitToken && configuredLocalEndpoint()) {
+      state.localFirst = true;
+      state.token = '';
+      state.localAccess = false;
+      setConnection('Looking for this PC', 'connection-reconnecting');
+      setNotice('Connecting to this PC automatically.');
+      probeLocalEndpoint(true).then(function (connected) {
+        if (connected) {
+          connectEvents();
+          return;
+        }
+        if (!savedRemoteToken) return;
+        cancelLocalProbeRetry();
+        state.endpoint = initial.endpoint;
+        state.token = savedRemoteToken;
+        state.localAccess = false;
+        requestSnapshot().then(connectEvents);
+      });
+    } else if (!state.token && !state.localAccess) {
       setConnection('Looking for this PC', 'connection-reconnecting');
       setNotice('Connecting to this PC automatically.');
       probeLocalEndpoint().then(function (connected) { if (connected) connectEvents(); });
