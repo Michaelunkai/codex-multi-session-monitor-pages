@@ -10,7 +10,10 @@
     search: '',
     eventSource: null,
     reconnectTimer: null,
-    pollTimer: null
+    pollTimer: null,
+    localRetryTimer: null,
+    localProbePromise: null,
+    lastLocalEndpoint: ''
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -104,12 +107,27 @@
       var origin = originOf(value);
       if (origin && candidates.indexOf(origin) < 0) candidates.push(origin);
     }
+    // Prefer the endpoint that was last proven healthy. START may choose a
+    // different free port after a restart, so retain the full local range as
+    // a deterministic failover rather than pinning the page to one port.
+    add(state.lastLocalEndpoint);
     add(configuredLocal);
     for (var port = 8765; port <= 8800; port += 1) add('http://127.0.0.1:' + port);
     return candidates;
   }
 
+  function scheduleLocalProbe(delay) {
+    if (state.token || state.localRetryTimer) return;
+    state.localRetryTimer = setTimeout(function () {
+      state.localRetryTimer = null;
+      probeLocalEndpoint().then(function (connected) {
+        if (connected) connectEvents();
+      });
+    }, delay || 2500);
+  }
+
   function probeLocalEndpoint() {
+    if (state.localProbePromise) return state.localProbePromise;
     var candidates = localEndpointCandidates();
     var index = 0;
     function attempt() {
@@ -117,31 +135,50 @@
         state.localProbe = false;
         state.localAccess = false;
         state.endpoint = defaultEndpoint();
-        setConnection('Token needed', 'connection-reconnecting');
+        setConnection('Looking for this PC', 'connection-reconnecting');
         setConnectPanel(true);
-        setNotice('This page is not connected to the monitor PC. Paste the private access URL for another machine.');
+        setNotice('Waiting for the local monitor. This page will reconnect automatically when the PC monitor is ready; another machine can use its private access link.');
+        scheduleLocalProbe(2500);
         return Promise.resolve(false);
       }
       state.endpoint = candidates[index++];
       state.localAccess = true;
       state.localProbe = true;
-      var requestOptions = { cache: 'no-store', targetAddressSpace: 'loopback' };
+      var requestOptions = { cache: 'no-store', mode: 'cors', targetAddressSpace: 'loopback' };
+      var abortTimer = null;
+      if (window.AbortController) {
+        var controller = new window.AbortController();
+        requestOptions.signal = controller.signal;
+        abortTimer = setTimeout(function () { controller.abort(); }, 1800);
+      }
       return fetch(apiUrl('/api/snapshot'), requestOptions)
         .then(function (response) {
+          if (abortTimer) clearTimeout(abortTimer);
           if (!response.ok) throw new Error('local probe HTTP ' + response.status);
           return response.json();
         })
         .then(function (snapshot) {
           state.localProbe = false;
+          state.lastLocalEndpoint = state.endpoint;
           render(failClosedSnapshot(snapshot));
           setConnectPanel(false);
           setConnection('Live · this PC', 'connection-live');
           setNotice('');
           return true;
         })
-        .catch(function () { return attempt(); });
+        .catch(function () {
+          if (abortTimer) clearTimeout(abortTimer);
+          return attempt();
+        });
     }
-    return attempt();
+    state.localProbePromise = attempt().then(function (connected) {
+      state.localProbePromise = null;
+      return connected;
+    }, function (error) {
+      state.localProbePromise = null;
+      throw error;
+    });
+    return state.localProbePromise;
   }
 
   function setConnection(label, className) {
@@ -450,9 +487,10 @@
           state.localProbe = false;
           state.localAccess = false;
           state.endpoint = defaultEndpoint();
-          setConnection('Token needed', 'connection-reconnecting');
+          setConnection('Looking for this PC', 'connection-reconnecting');
           setConnectPanel(true);
-          setNotice('This page is not connected to the monitor PC. Paste the private access URL for this machine.');
+          setNotice('Waiting for the local monitor. This page will reconnect automatically when it is ready.');
+          scheduleLocalProbe(2500);
           return;
         }
         if (error && error.message === 'snapshot HTTP 401') {
@@ -463,6 +501,7 @@
         }
         setConnection('Reconnecting', 'connection-reconnecting');
         setNotice('Dashboard connection lost: ' + error.message);
+        if (state.localAccess && !state.token) scheduleLocalProbe(500);
       });
   }
 
@@ -493,6 +532,7 @@
     state.eventSource.onerror = function () {
       setConnection('Reconnecting', 'connection-reconnecting');
       startPollingFallback();
+      if (state.localAccess && !state.token) scheduleLocalProbe(500);
       if (state.reconnectTimer) return;
       state.reconnectTimer = setTimeout(function () {
         state.reconnectTimer = null;
