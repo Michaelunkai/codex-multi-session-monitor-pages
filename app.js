@@ -13,7 +13,9 @@
     pollTimer: null,
     localRetryTimer: null,
     localProbePromise: null,
-    lastLocalEndpoint: ''
+    lastLocalEndpoint: '',
+    snapshotRequestPromise: null,
+    snapshotRefreshQueued: false
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -214,6 +216,94 @@
     return snapshot;
   }
 
+  function outputEntryKey(entry, index) {
+    var id = text(entry && entry.id, '');
+    return id ? 'id:' + id : 'ordinal:' + text(entry && entry.ordinal, '0') + ':' + String(index);
+  }
+
+  function hasOwn(object, key) {
+    return Object.prototype.hasOwnProperty.call(object || {}, key);
+  }
+
+  function applyOutputDelta(entries, output) {
+    var current = Array.isArray(entries) ? entries.map(function (entry) { return { ...entry }; }) : [];
+    if (!output) return current;
+    if (output.mode === 'replace') {
+      if (!Array.isArray(output.entries)) return null;
+      return output.entries.map(function (entry) { return { ...entry }; });
+    }
+    if (output.mode !== 'patch' || !Array.isArray(output.upserts) || !Array.isArray(output.removedIds)) return null;
+    var removed = new Set(output.removedIds);
+    current = current.filter(function (entry, index) { return !removed.has(outputEntryKey(entry, index)); });
+    var byKey = new Map();
+    current.forEach(function (entry, index) { byKey.set(outputEntryKey(entry, index), index); });
+    for (var index = 0; index < output.upserts.length; index += 1) {
+      var patch = output.upserts[index];
+      var key = outputEntryKey(patch, index);
+      var existingIndex = byKey.get(key);
+      if (hasOwn(patch, 'appendText')) {
+        if (existingIndex === undefined) return null;
+        var appended = { ...current[existingIndex], ...patch, text: text(current[existingIndex].text) + text(patch.appendText) };
+        delete appended.appendText;
+        current[existingIndex] = appended;
+      } else if (patch.keepText) {
+        if (existingIndex === undefined) return null;
+        var metadata = { ...current[existingIndex], ...patch };
+        delete metadata.keepText;
+        current[existingIndex] = metadata;
+      } else if (existingIndex === undefined) {
+        current.push({ ...patch });
+        byKey.set(key, current.length - 1);
+      } else {
+        current[existingIndex] = { ...current[existingIndex], ...patch };
+      }
+    }
+    return current.sort(function (left, right) {
+      return (Number(left.ordinal) - Number(right.ordinal)) || (Number(left.timestampMs) - Number(right.timestampMs));
+    });
+  }
+
+  function applyDelta(delta) {
+    if (!state.snapshot || !delta || delta.type !== 'delta') return null;
+    if (delta.scope !== 'running-now' || delta.displayMode !== 'running-only') throw new Error('server did not return the locked running-only delta');
+    if (!Number.isInteger(delta.baseRevision) || !Number.isInteger(delta.revision) || delta.revision !== delta.baseRevision + 1) return null;
+    if (Number(state.snapshot.revision) !== delta.baseRevision) return null;
+    if (!Array.isArray(delta.added) || !Array.isArray(delta.updated) || !Array.isArray(delta.removedIds)) throw new Error('invalid live delta shape');
+    var removed = new Set(delta.removedIds.map(String));
+    var sessions = (state.snapshot.sessions || []).filter(function (session) { return !removed.has(String(session.id)); }).map(function (session) {
+      return { ...session, liveOutput: Array.isArray(session.liveOutput) ? session.liveOutput.map(function (entry) { return { ...entry }; }) : [] };
+    });
+    var byId = new Map(sessions.map(function (session, index) { return [String(session.id), index]; }));
+    for (var addIndex = 0; addIndex < delta.added.length; addIndex += 1) {
+      var added = delta.added[addIndex];
+      if (!added || added.status !== 'RUNNING' || byId.has(String(added.id))) throw new Error('invalid added live session');
+      sessions.push({ ...added, liveOutput: Array.isArray(added.liveOutput) ? added.liveOutput.map(function (entry) { return { ...entry }; }) : [] });
+      byId.set(String(added.id), sessions.length - 1);
+    }
+    for (var updateIndex = 0; updateIndex < delta.updated.length; updateIndex += 1) {
+      var update = delta.updated[updateIndex];
+      var sessionIndex = byId.get(String(update && update.id));
+      if (sessionIndex === undefined || !update || !update.session) return null;
+      var prior = sessions[sessionIndex];
+      var liveOutput = applyOutputDelta(prior.liveOutput, update.output);
+      if (!liveOutput || update.session.status !== 'RUNNING') return null;
+      sessions[sessionIndex] = { ...prior, ...update.session, liveOutput: liveOutput };
+    }
+    sessions.sort(function (left, right) { return String(right.lastActivityAt || '').localeCompare(String(left.lastActivityAt || '')); });
+    var next = failClosedSnapshot({
+      ...state.snapshot,
+      schemaVersion: delta.schemaVersion || state.snapshot.schemaVersion,
+      revision: delta.revision,
+      generatedAt: delta.generatedAt,
+      source: delta.source,
+      scope: delta.scope,
+      displayMode: delta.displayMode,
+      summary: delta.summary,
+      sessions: sessions
+    });
+    return { snapshot: next, updated: delta.updated, added: delta.added, removedIds: delta.removedIds };
+  }
+
   function formatAge(seconds) {
     if (seconds === null || seconds === undefined || !isFinite(seconds)) return 'unknown';
     var value = Number(seconds);
@@ -322,34 +412,53 @@
     return panel;
   }
 
+  function transcriptStateText(session) {
+    return session.liveTransport === 'codex-ipc' ? 'LIVE DESKTOP IPC · updating now' : 'LIVE CODEX ROLLOUT · updating now';
+  }
+
+  function renderTranscriptEntry(entry, index) {
+    var block = make('section', 'transcript-entry');
+    block.dataset.entryKey = outputEntryKey(entry, index);
+    var meta = make('div', 'transcript-entry-meta');
+    meta.appendChild(make('span', 'transcript-entry-kind', entryLabel(entry)));
+    meta.appendChild(make('span', 'transcript-entry-time', formatEntryTime(entry.at)));
+    block.appendChild(meta);
+    block.appendChild(make('pre', 'transcript-text', text(entry.text, '')));
+    if (entry.truncated) block.appendChild(make('div', 'transcript-warning', 'Output safety limit reached; older text is not shown.'));
+    return block;
+  }
+
+  function renderTranscriptContents(scroll, entries) {
+    scroll.textContent = '';
+    if (!entries.length) {
+      scroll.appendChild(make('div', 'transcript-empty', 'Codex is running; no user-visible output has been committed yet.'));
+      return;
+    }
+    entries.forEach(function (entry, index) { scroll.appendChild(renderTranscriptEntry(entry, index)); });
+  }
+
   function renderTranscript(session) {
     var panel = make('div', 'live-transcript');
     panel.setAttribute('aria-label', 'Live output for ' + text(session.title, 'Codex session'));
     var heading = make('div', 'transcript-heading');
     heading.appendChild(make('span', 'transcript-title', 'LIVE OUTPUT'));
-    var direct = session.liveTransport === 'codex-ipc';
-    heading.appendChild(make('span', 'transcript-state', direct ? 'DIRECT FROM DESKTOP · updating now' : 'read-only fallback · waiting for direct stream'));
+    heading.appendChild(make('span', 'transcript-state', transcriptStateText(session)));
     panel.appendChild(heading);
     var scroll = make('div', 'transcript-scroll');
     scroll.setAttribute('role', 'log');
     scroll.setAttribute('aria-live', 'off');
     var entries = Array.isArray(session.liveOutput) ? session.liveOutput : [];
-    if (!entries.length) {
-      scroll.appendChild(make('div', 'transcript-empty', 'Codex is running; no user-visible output has been committed yet.'));
-    } else {
-      entries.forEach(function (entry) {
-        var block = make('section', 'transcript-entry');
-        var meta = make('div', 'transcript-entry-meta');
-        meta.appendChild(make('span', 'transcript-entry-kind', entryLabel(entry)));
-        meta.appendChild(make('span', 'transcript-entry-time', formatEntryTime(entry.at)));
-        block.appendChild(meta);
-        block.appendChild(make('pre', 'transcript-text', text(entry.text, '')));
-        if (entry.truncated) block.appendChild(make('div', 'transcript-warning', 'Output safety limit reached; older text is not shown.'));
-        scroll.appendChild(block);
-      });
-    }
+    renderTranscriptContents(scroll, entries);
     panel.appendChild(scroll);
     return panel;
+  }
+
+  function renderChipRow(session) {
+    var chips = make('div', 'chip-row');
+    chips.appendChild(make('span', 'chip', text(session.sourceLabel, 'Codex local')));
+    chips.appendChild(make('span', 'chip', text(session.project, 'Unknown project')));
+    if (session.model && session.model !== 'unknown') chips.appendChild(make('span', 'chip', session.model));
+    return chips;
   }
 
   function renderCard(session, index, savedScroll) {
@@ -366,11 +475,7 @@
     titleRow.appendChild(make('h2', 'card-title', text(session.title, 'Untitled Codex session')));
     card.appendChild(titleRow);
 
-    var chips = make('div', 'chip-row');
-    chips.appendChild(make('span', 'chip', text(session.sourceLabel, 'Codex local')));
-    chips.appendChild(make('span', 'chip', text(session.project, 'Unknown project')));
-    if (session.model && session.model !== 'unknown') chips.appendChild(make('span', 'chip', session.model));
-    card.appendChild(chips);
+    card.appendChild(renderChipRow(session));
     card.appendChild(renderActivity(session));
     card.appendChild(renderTranscript(session));
 
@@ -410,6 +515,136 @@
     card.appendChild(details);
     if (savedScroll && savedScroll.open) details.open = true;
     return card;
+  }
+
+  function cardForSession(id) {
+    var cards = byId('cards').querySelectorAll('article');
+    for (var index = 0; index < cards.length; index += 1) {
+      if (String(cards[index].dataset.sessionId) === String(id)) return cards[index];
+    }
+    return null;
+  }
+
+  function transcriptEntryFor(scroll, key) {
+    var entries = scroll.querySelectorAll('.transcript-entry');
+    for (var index = 0; index < entries.length; index += 1) {
+      if (entries[index].dataset.entryKey === key) return entries[index];
+    }
+    return null;
+  }
+
+  function updateTranscriptEntry(block, entry, index) {
+    block.dataset.entryKey = outputEntryKey(entry, index);
+    block.querySelector('.transcript-entry-kind').textContent = entryLabel(entry);
+    block.querySelector('.transcript-entry-time').textContent = formatEntryTime(entry.at);
+    block.querySelector('.transcript-text').textContent = text(entry.text, '');
+    var warning = block.querySelector('.transcript-warning');
+    if (entry.truncated && !warning) block.appendChild(make('div', 'transcript-warning', 'Output safety limit reached; older text is not shown.'));
+    if (!entry.truncated && warning) warning.remove();
+  }
+
+  function syncTranscript(card, session, output) {
+    var transcript = card.querySelector('.live-transcript');
+    var scroll = card.querySelector('.transcript-scroll');
+    if (!transcript || !scroll) return;
+    transcript.querySelector('.transcript-state').textContent = transcriptStateText(session);
+    if (!output) return;
+    var entries = Array.isArray(session.liveOutput) ? session.liveOutput : [];
+    var wasAtBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 24;
+    if (output.mode !== 'patch') {
+      renderTranscriptContents(scroll, entries);
+    } else {
+      output.removedIds.forEach(function (key) {
+        var removed = transcriptEntryFor(scroll, key);
+        if (removed) removed.remove();
+      });
+      output.upserts.forEach(function (patch, patchIndex) {
+        var key = outputEntryKey(patch, patchIndex);
+        var entryIndex = entries.findIndex(function (entry, index) { return outputEntryKey(entry, index) === key; });
+        if (entryIndex < 0) return;
+        var entry = entries[entryIndex];
+        var block = transcriptEntryFor(scroll, key);
+        if (block) updateTranscriptEntry(block, entry, entryIndex);
+        else {
+          var empty = scroll.querySelector('.transcript-empty');
+          if (empty) empty.remove();
+          scroll.appendChild(renderTranscriptEntry(entry, entryIndex));
+        }
+      });
+      var blocks = scroll.querySelectorAll('.transcript-entry');
+      var ordered = blocks.length === entries.length;
+      for (var index = 0; ordered && index < entries.length; index += 1) {
+        ordered = blocks[index].dataset.entryKey === outputEntryKey(entries[index], index);
+      }
+      if (!ordered) renderTranscriptContents(scroll, entries);
+    }
+    if (wasAtBottom) scroll.scrollTop = scroll.scrollHeight;
+  }
+
+  function updateCard(session, output) {
+    var card = cardForSession(session.id);
+    if (!card) return false;
+    card.dataset.outputDigest = text(session.outputDigest, '');
+    card.querySelector('.card-title').textContent = text(session.title, 'Untitled Codex session');
+    var oldChips = card.querySelector('.chip-row');
+    if (oldChips) oldChips.parentNode.replaceChild(renderChipRow(session), oldChips);
+    var oldActivity = card.querySelector('.live-activity');
+    if (oldActivity) oldActivity.parentNode.replaceChild(renderActivity(session), oldActivity);
+    syncTranscript(card, session, output);
+    var metrics = card.querySelectorAll('.metric-value');
+    if (metrics.length >= 3) {
+      if (session.lastActivityAt) {
+        metrics[0].dataset.activityAt = session.lastActivityAt;
+        metrics[0].textContent = formatAge((Date.now() - Date.parse(session.lastActivityAt)) / 1000);
+      } else {
+        metrics[0].removeAttribute('data-activity-at');
+        metrics[0].textContent = formatAge(session.lastActivityAgeSeconds);
+      }
+      if (session.latestTurnStartedAt) {
+        metrics[1].dataset.startedAt = session.latestTurnStartedAt;
+        metrics[1].textContent = formatDuration((Date.now() - Date.parse(session.latestTurnStartedAt)) / 1000);
+      } else {
+        metrics[1].removeAttribute('data-started-at');
+        metrics[1].textContent = formatDuration(session.elapsedSeconds);
+      }
+      metrics[2].textContent = text(session.outputChars, '0') + ' chars';
+    }
+    var detailValues = card.querySelectorAll('.detail-value');
+    if (detailValues.length >= 4) {
+      detailValues[0].textContent = text(session.cwd, 'unknown');
+      detailValues[1].textContent = text(session.latestTurnId, 'unknown');
+      detailValues[2].textContent = text(session.statusReliability, 'unknown');
+      detailValues[3].textContent = text(session.id, 'unknown');
+    }
+    return true;
+  }
+
+  function syncCardOrder() {
+    var container = byId('cards');
+    var sessions = filteredSessions();
+    var visibleIds = new Set(sessions.map(function (session) { return String(session.id); }));
+    sessions.forEach(function (session, index) {
+      var card = cardForSession(session.id);
+      if (!card) card = renderCard(session, index, null);
+      var number = card.querySelector('.card-number');
+      if (number) number.textContent = '#' + String(index + 1).padStart(2, '0');
+      container.appendChild(card);
+    });
+    Array.prototype.forEach.call(container.querySelectorAll('article'), function (card) {
+      if (!visibleIds.has(String(card.dataset.sessionId))) card.remove();
+    });
+    byId('emptyState').classList.toggle('hidden', sessions.length !== 0);
+  }
+
+  function renderDelta(result) {
+    state.snapshot = result.snapshot;
+    renderSummary(result.snapshot);
+    var sessions = new Map((result.snapshot.sessions || []).map(function (session) { return [String(session.id), session]; }));
+    result.updated.forEach(function (update) {
+      var session = sessions.get(String(update.id));
+      if (session) updateCard(session, update.output);
+    });
+    syncCardOrder();
   }
 
   function renderCards() {
@@ -452,6 +687,10 @@
       setNotice('Paste the complete private PC access URL below. It contains the bearer token in the URL fragment and is not sent to the hosting service.');
       return Promise.resolve();
     }
+    if (state.snapshotRequestPromise) {
+      state.snapshotRefreshQueued = true;
+      return state.snapshotRequestPromise;
+    }
     var requestOptions = { cache: 'no-store' };
     if (state.token && !state.localAccess) requestOptions.headers = { Authorization: 'Bearer ' + state.token };
     if (state.localProbe && window.AbortController) {
@@ -460,7 +699,7 @@
       setTimeout(function () { controller.abort(); }, 2500);
     }
     var probingLocal = state.localProbe;
-    return fetch(apiUrl('/api/snapshot'), requestOptions)
+    var request = fetch(apiUrl('/api/snapshot'), requestOptions)
       .then(function (response) {
         if (!response.ok) {
           if (response.status === 401) {
@@ -503,6 +742,15 @@
         setNotice('Dashboard connection lost: ' + error.message);
         if (state.localAccess && !state.token) scheduleLocalProbe(500);
       });
+    state.snapshotRequestPromise = request;
+    request.finally(function () {
+      if (state.snapshotRequestPromise !== request) return;
+      state.snapshotRequestPromise = null;
+      if (!state.snapshotRefreshQueued) return;
+      state.snapshotRefreshQueued = false;
+      requestSnapshot();
+    });
+    return request;
   }
 
   function startPollingFallback() {
@@ -516,9 +764,10 @@
       return;
     }
     if (state.eventSource) state.eventSource.close();
-    state.eventSource = new EventSource(apiUrl('/events'));
+    state.eventSource = new EventSource(apiUrl('/events?mode=delta'));
     state.eventSource.onopen = function () {
       if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+      requestSnapshot();
     };
     state.eventSource.addEventListener('snapshot', function (event) {
       try {
@@ -529,6 +778,36 @@
         setNotice('Invalid live snapshot: ' + error.message);
       }
     });
+    state.eventSource.addEventListener('changed', function (event) {
+      try {
+        var change = JSON.parse(event.data);
+        if (!Number.isInteger(change.revision) || change.revision < 1) throw new Error('invalid revision notification');
+        var currentRevision = Number(state.snapshot && state.snapshot.revision) || 0;
+        if (!state.snapshot || change.revision > currentRevision) requestSnapshot();
+      } catch (error) {
+        setNotice('Invalid live revision: ' + error.message);
+      }
+    });
+    state.eventSource.addEventListener('delta', function (event) {
+      try {
+        var delta = JSON.parse(event.data);
+        if (state.snapshotRequestPromise) {
+          state.snapshotRefreshQueued = true;
+          return;
+        }
+        var result = applyDelta(delta);
+        if (!result) {
+          requestSnapshot();
+          return;
+        }
+        renderDelta(result);
+        setConnectPanel(false);
+        setConnection(result.snapshot.source === 'synthetic-test' ? 'Test fixture' : (state.localAccess ? 'Live · this PC' : 'Live'), 'connection-live');
+      } catch (error) {
+        setNotice('Invalid live delta: ' + error.message);
+        requestSnapshot();
+      }
+    });
     state.eventSource.onerror = function () {
       setConnection('Reconnecting', 'connection-reconnecting');
       startPollingFallback();
@@ -537,7 +816,7 @@
       state.reconnectTimer = setTimeout(function () {
         state.reconnectTimer = null;
         connectEvents();
-      }, 3000);
+      }, 1000);
     };
   }
 
