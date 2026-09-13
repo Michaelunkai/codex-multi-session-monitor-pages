@@ -18,7 +18,11 @@
     copyTokenPromise: null,
     copyReady: false,
     snapshotRequestPromise: null,
-    snapshotRefreshQueued: false
+    snapshotRefreshQueued: false,
+    scriptFallback: false,
+    scriptPollTimer: null,
+    scriptRequestPromise: null,
+    scriptRefreshQueued: false
   };
 
   function byId(id) { return document.getElementById(id); }
@@ -32,6 +36,18 @@
     var parsed = browserUrl(value);
     if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) return '';
     return parsed.origin;
+  }
+
+  function isLoopbackOrigin(value) {
+    var parsed = browserUrl(value);
+    if (!parsed) return false;
+    if (parsed.protocol !== 'http:') return false;
+    var host = String(parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  }
+
+  function isLocalWallPage() {
+    return isLoopbackOrigin(window.location.origin);
   }
 
   function configuredEndpoint() {
@@ -50,6 +66,7 @@
   }
 
   function defaultEndpoint() {
+    if (isLocalWallPage()) return window.location.origin;
     return originOf(configuredEndpoint() || window.location.origin) || window.location.origin;
   }
 
@@ -107,7 +124,7 @@
   function localEndpointCandidates() {
     var candidates = [];
     var configuredLocal = configuredLocalEndpoint();
-    if (!configuredLocal) return candidates;
+    if (!configuredLocal && !isLocalWallPage()) return candidates;
     function add(value) {
       var origin = originOf(value);
       if (origin && candidates.indexOf(origin) < 0) candidates.push(origin);
@@ -115,6 +132,7 @@
     // Prefer the endpoint that was last proven healthy. START may choose a
     // different free port after a restart, so retain the full local range as
     // a deterministic failover rather than pinning the page to one port.
+    if (isLocalWallPage()) add(window.location.origin);
     add(state.lastLocalEndpoint);
     add(configuredLocal);
     for (var port = 8765; port <= 8800; port += 1) add('http://127.0.0.1:' + port);
@@ -162,7 +180,10 @@
       if (window.AbortController) {
         var controller = new window.AbortController();
         requestOptions.signal = controller.signal;
-        abortTimer = setTimeout(function () { controller.abort(); }, 1800);
+        // A live wall carries complete per-session transcripts. A healthy
+        // local snapshot can therefore be several megabytes and may need a
+        // few seconds to transfer and parse before the PC is considered found.
+        abortTimer = setTimeout(function () { controller.abort(); }, 10000);
       }
       return fetch(apiUrl('/api/snapshot'), requestOptions)
         .then(function (response) {
@@ -244,6 +265,16 @@
     var sessions = Array.isArray(snapshot && snapshot.sessions) ? snapshot.sessions : [];
     if (!snapshot || snapshot.scope !== 'running-now' || snapshot.displayMode !== 'running-only') {
       throw new Error('server did not return the locked running-only view');
+    }
+    var summary = snapshot.summary || {};
+    if (!Number.isInteger(Number(summary.runningCount)) || Number(summary.runningCount) < 0 || Number(summary.runningCount) !== sessions.length) {
+      throw new Error('server running count did not match the live session list');
+    }
+    var ids = new Set();
+    for (var sessionIndex = 0; sessionIndex < sessions.length; sessionIndex += 1) {
+      var sessionId = text(sessions[sessionIndex] && sessions[sessionIndex].id, '');
+      if (!sessionId || ids.has(sessionId)) throw new Error('server returned duplicate or missing live session ids');
+      ids.add(sessionId);
     }
     if (sessions.some(function (session) { return session.status !== 'RUNNING'; })) {
       throw new Error('server returned a non-running session; wall refused to render it');
@@ -373,10 +404,15 @@
     var summary = snapshot.summary || {};
     var sessions = snapshot.sessions || [];
     var outputCount = sessions.filter(function (session) { return Array.isArray(session.liveOutput) && session.liveOutput.length > 0; }).length;
-    var running = Number(summary.runningCount);
-    if (!isFinite(running)) running = sessions.length;
+    // failClosedSnapshot proves this is the authoritative exact count. Never
+    // display a separate, potentially stale count from a filtered DOM view.
+    var running = sessions.length;
     byId('runningCount').textContent = String(running);
-    byId('outputCount').textContent = String(outputCount);
+    byId('outputCount').textContent = outputCount + ' / ' + running;
+    var statusRunningCount = byId('statusRunningCount');
+    if (statusRunningCount) statusRunningCount.textContent = String(running);
+    var statusOutputCoverage = byId('statusOutputCoverage');
+    if (statusOutputCoverage) statusOutputCoverage.textContent = outputCount + '/' + running + ' with exact output';
     byId('hiddenCount').textContent = String(Number(summary.hiddenNonRunningCount) || 0);
     var freshness = Number(summary.freshnessSeconds);
     byId('freshnessValue').textContent = isFinite(freshness) ? (freshness < 1 ? '<1s' : Math.round(freshness) + 's') : '—';
@@ -455,9 +491,14 @@
       container.appendChild(row);
     });
     var meta = byId('sessionIndexMeta');
-    if (meta) meta.textContent = sessions.length + ' live · sorted by latest event';
+    var totalSessions = state.snapshot && Array.isArray(state.snapshot.sessions) ? state.snapshot.sessions.length : sessions.length;
+    if (meta) meta.textContent = state.search
+      ? sessions.length + ' of ' + totalSessions + ' live · filtered'
+      : totalSessions + ' live · every session shown';
     var feedCount = byId('feedCount');
-    if (feedCount) feedCount.textContent = sessions.length + ' live transcript' + (sessions.length === 1 ? '' : 's');
+    if (feedCount) feedCount.textContent = state.search
+      ? sessions.length + ' of ' + totalSessions + ' transcript' + (totalSessions === 1 ? '' : 's')
+      : sessions.length + ' live transcript' + (sessions.length === 1 ? '' : 's');
   }
 
   function make(tag, className, content) {
@@ -507,6 +548,48 @@
     return session.liveTransport === 'codex-ipc' ? 'LIVE DESKTOP IPC · updating now' : 'LIVE CODEX ROLLOUT · updating now';
   }
 
+  function transcriptCountText(session) {
+    var entries = Array.isArray(session && session.liveOutput) ? session.liveOutput : [];
+    var chars = Number(session && session.outputChars);
+    if (!isFinite(chars)) chars = entries.reduce(function (total, entry) { return total + text(entry && entry.text, '').length; }, 0);
+    return entries.length + ' event' + (entries.length === 1 ? '' : 's') + ' · ' + chars + ' chars';
+  }
+
+  function visibleTranscriptEntries(entries) {
+    var source = Array.isArray(entries) ? entries : [];
+    var maxEntries = 24;
+    var maxChars = 120000;
+    var selected = [];
+    var chars = 0;
+    var omitted = false;
+    for (var index = source.length - 1; index >= 0; index -= 1) {
+      if (selected.length >= maxEntries || chars >= maxChars) {
+        omitted = true;
+        break;
+      }
+      var entry = source[index] || {};
+      var entryText = text(entry.text, '');
+      var remaining = maxChars - chars;
+      if (entryText.length > remaining) {
+        selected.push({
+          ...entry,
+          text: entryText.slice(-remaining),
+          presentationTruncated: true
+        });
+        chars += remaining;
+        omitted = true;
+        break;
+      }
+      selected.push(entry);
+      chars += entryText.length;
+    }
+    selected.reverse();
+    if ((omitted || selected.length < source.length) && selected.length) {
+      selected[0] = { ...selected[0], presentationTruncated: true };
+    }
+    return selected;
+  }
+
   function renderTranscriptEntry(entry, index) {
     var block = make('section', 'transcript-entry');
     block.dataset.entryKey = outputEntryKey(entry, index);
@@ -515,17 +598,20 @@
     meta.appendChild(make('span', 'transcript-entry-time', formatEntryTime(entry.at)));
     block.appendChild(meta);
     block.appendChild(make('pre', 'transcript-text', text(entry.text, '')));
-    if (entry.truncated) block.appendChild(make('div', 'transcript-warning', 'Output safety limit reached; older text is not shown.'));
+    if (entry.truncated || entry.presentationTruncated) {
+      block.appendChild(make('div', 'transcript-warning', 'Showing the newest live output; older transcript text is kept out of the page for instant, readable updates.'));
+    }
     return block;
   }
 
   function renderTranscriptContents(scroll, entries) {
     scroll.textContent = '';
-    if (!entries.length) {
+    var visibleEntries = visibleTranscriptEntries(entries);
+    if (!visibleEntries.length) {
       scroll.appendChild(make('div', 'transcript-empty', 'Codex is running; no user-visible output has been committed yet.'));
       return;
     }
-    entries.forEach(function (entry, index) { scroll.appendChild(renderTranscriptEntry(entry, index)); });
+    visibleEntries.forEach(function (entry, index) { scroll.appendChild(renderTranscriptEntry(entry, index)); });
   }
 
   function renderTranscript(session) {
@@ -534,6 +620,7 @@
     var heading = make('div', 'transcript-heading');
     heading.appendChild(make('span', 'transcript-title', 'LIVE OUTPUT'));
     heading.appendChild(make('span', 'transcript-state', transcriptStateText(session)));
+    heading.appendChild(make('span', 'transcript-count', transcriptCountText(session)));
     panel.appendChild(heading);
     var scroll = make('div', 'transcript-scroll');
     scroll.setAttribute('role', 'log');
@@ -630,8 +717,9 @@
     block.querySelector('.transcript-entry-time').textContent = formatEntryTime(entry.at);
     block.querySelector('.transcript-text').textContent = text(entry.text, '');
     var warning = block.querySelector('.transcript-warning');
-    if (entry.truncated && !warning) block.appendChild(make('div', 'transcript-warning', 'Output safety limit reached; older text is not shown.'));
-    if (!entry.truncated && warning) warning.remove();
+    var showWarning = entry.truncated || entry.presentationTruncated;
+    if (showWarning && !warning) block.appendChild(make('div', 'transcript-warning', 'Showing the newest live output; older transcript text is kept out of the page for instant, readable updates.'));
+    if (!showWarning && warning) warning.remove();
   }
 
   function syncTranscript(card, session, output) {
@@ -639,6 +727,8 @@
     var scroll = card.querySelector('.transcript-scroll');
     if (!transcript || !scroll) return;
     transcript.querySelector('.transcript-state').textContent = transcriptStateText(session);
+    var count = transcript.querySelector('.transcript-count');
+    if (count) count.textContent = transcriptCountText(session);
     if (!output) return;
     var entries = Array.isArray(session.liveOutput) ? session.liveOutput : [];
     var wasAtBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 24;
@@ -784,7 +874,115 @@
     renderCards();
   }
 
+  function localScriptTransportAvailable() {
+    return state.localAccess && !state.token && originOf(state.endpoint) === originOf(window.location.origin);
+  }
+
+  function useBootstrapSnapshot() {
+    var snapshot = window.__CODEX_MONITOR_BOOTSTRAP__;
+    try {
+      if (!snapshot) {
+        var bootstrapNode = byId('codexMonitorBootstrap');
+        if (!bootstrapNode) return false;
+        snapshot = JSON.parse(bootstrapNode.textContent || '');
+      }
+      render(failClosedSnapshot(snapshot));
+      setConnectPanel(false);
+      setConnection('Live · this PC', 'connection-live');
+      setNotice('');
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function scriptSnapshotUrl() {
+    var parsed = browserUrl((state.endpoint || window.location.origin).replace(/\/+$/, '') + '/wall.js');
+    if (!parsed) return '/wall.js';
+    parsed.searchParams.set('_', String(Date.now()));
+    return parsed.toString();
+  }
+
+  function stopScriptPolling() {
+    if (!state.scriptPollTimer) return;
+    clearInterval(state.scriptPollTimer);
+    state.scriptPollTimer = null;
+  }
+
+  function startScriptPolling() {
+    if (!localScriptTransportAvailable() || state.scriptPollTimer) return;
+    state.scriptPollTimer = setInterval(function () { requestScriptSnapshot(); }, 500);
+  }
+
+  function requestScriptSnapshot() {
+    if (!localScriptTransportAvailable()) return Promise.reject(new Error('local script transport is unavailable'));
+    if (state.scriptRequestPromise) {
+      state.scriptRefreshQueued = true;
+      return state.scriptRequestPromise;
+    }
+    var request = new Promise(function (resolve, reject) {
+      var script = document.createElement('script');
+      var timeout = setTimeout(function () {
+        cleanup();
+        reject(new Error('local script snapshot timed out'));
+      }, 12000);
+      function cleanup() {
+        clearTimeout(timeout);
+        script.onload = null;
+        script.onerror = null;
+        if (script.parentNode) script.parentNode.removeChild(script);
+      }
+      script.async = true;
+      script.src = scriptSnapshotUrl();
+      script.onload = function () {
+        var snapshot = window.__CODEX_MONITOR_SCRIPT_SNAPSHOT__;
+        cleanup();
+        if (!snapshot) {
+          reject(new Error('local script snapshot was empty'));
+          return;
+        }
+        try {
+          render(failClosedSnapshot(snapshot));
+          state.localProbe = false;
+          state.scriptFallback = true;
+          setConnectPanel(false);
+          setConnection('Live · this PC', 'connection-live');
+          setNotice('');
+          resolve(snapshot);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      script.onerror = function () {
+        cleanup();
+        reject(new Error('local script snapshot failed to load'));
+      };
+      document.head.appendChild(script);
+    });
+    state.scriptRequestPromise = request;
+    request.finally(function () {
+      if (state.scriptRequestPromise !== request) return;
+      state.scriptRequestPromise = null;
+      if (!state.scriptRefreshQueued) return;
+      state.scriptRefreshQueued = false;
+      requestScriptSnapshot();
+    });
+    return request;
+  }
+
+  function recoverWithLocalScriptTransport() {
+    if (!localScriptTransportAvailable()) return Promise.reject(new Error('local script transport is unavailable'));
+    state.scriptFallback = true;
+    if (state.eventSource) {
+      state.eventSource.close();
+      state.eventSource = null;
+    }
+    startScriptPolling();
+    return requestScriptSnapshot();
+  }
+
   function requestSnapshot() {
+    if (state.scriptFallback && localScriptTransportAvailable()) return requestScriptSnapshot();
     if (!state.token && !state.localAccess) {
       setConnection('Token needed', 'connection-reconnecting');
       setConnectPanel(true);
@@ -837,6 +1035,12 @@
           scheduleLocalProbe(2500);
           return;
         }
+        if (localScriptTransportAvailable()) {
+          return recoverWithLocalScriptTransport().catch(function (scriptError) {
+            setConnection('Reconnecting', 'connection-reconnecting');
+            setNotice('Dashboard connection lost: ' + error.message + ' · local fallback: ' + scriptError.message);
+          });
+        }
         if (error && error.message === 'snapshot HTTP 401') {
           setConnection('Token needed', 'connection-reconnecting');
           setConnectPanel(true);
@@ -859,12 +1063,27 @@
   }
 
   function startPollingFallback() {
+    if (state.scriptFallback && localScriptTransportAvailable()) {
+      startScriptPolling();
+      return;
+    }
     if (state.pollTimer) return;
     state.pollTimer = setInterval(requestSnapshot, 2000);
   }
 
   function connectEvents() {
+    if (state.scriptFallback && localScriptTransportAvailable()) {
+      startScriptPolling();
+      return;
+    }
     if ((!state.token && !state.localAccess) || !window.EventSource) {
+      if (localScriptTransportAvailable()) {
+        recoverWithLocalScriptTransport().catch(function (error) {
+          setConnection('Reconnecting', 'connection-reconnecting');
+          setNotice('Dashboard connection lost: ' + error.message);
+        });
+        return;
+      }
       startPollingFallback();
       return;
     }
@@ -915,6 +1134,12 @@
     });
     state.eventSource.onerror = function () {
       setConnection('Reconnecting', 'connection-reconnecting');
+      if (localScriptTransportAvailable()) {
+        recoverWithLocalScriptTransport().catch(function (error) {
+          setNotice('Dashboard connection lost: ' + error.message);
+        });
+        return;
+      }
       startPollingFallback();
       if (state.localAccess && !state.token) scheduleLocalProbe(500);
       if (state.reconnectTimer) return;
@@ -1056,6 +1281,22 @@
       });
     });
     setConnectPanel(false);
+    // A page served by the local monitor is already on the exact port chosen
+    // by START. Do not briefly probe a stale configured hint (for example a
+    // previous free port) before rendering this PC's live wall.
+    if (!explicitToken && isLocalWallPage()) {
+      state.endpoint = window.location.origin;
+      state.token = '';
+      state.localAccess = true;
+      state.localProbe = false;
+      var bootstrapped = useBootstrapSnapshot();
+      if (bootstrapped) {
+        connectEvents();
+      } else {
+        requestSnapshot().then(connectEvents);
+      }
+      return;
+    }
     // A browser on the PC may have a previously saved remote token. The local
     // monitor is still the authoritative default there, so make one quick
     // local attempt before using that token. Explicit access URLs continue to
