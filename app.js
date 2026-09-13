@@ -981,7 +981,7 @@
     return requestScriptSnapshot();
   }
 
-  function requestSnapshot() {
+  function requestSnapshot(compactFirst) {
     if (state.scriptFallback && localScriptTransportAvailable()) return requestScriptSnapshot();
     if (!state.token && !state.localAccess) {
       setConnection('Token needed', 'connection-reconnecting');
@@ -1001,7 +1001,8 @@
       setTimeout(function () { controller.abort(); }, 2500);
     }
     var probingLocal = state.localProbe;
-    var request = fetch(apiUrl('/api/snapshot'), requestOptions)
+    var snapshotPath = compactFirst ? '/api/snapshot?compact=1' : '/api/snapshot';
+    var request = fetch(apiUrl(snapshotPath), requestOptions)
       .then(function (response) {
         if (!response.ok) {
           if (response.status === 401) {
@@ -1023,6 +1024,10 @@
         setConnectPanel(false);
         setConnection(snapshot.source === 'synthetic-test' ? 'Test fixture' : (state.localAccess ? 'Live · this PC' : 'Live'), 'connection-live');
         if (state.localAccess || state.token) accessTokenForCopy().catch(function () {});
+        // A remote wall first paints the exact running set and activity from a
+        // small compact snapshot. Immediately hydrate the complete verbatim
+        // transcripts in the background; subsequent SSE deltas stay compact.
+        if (compactFirst && snapshot.compact) state.snapshotRefreshQueued = true;
       })
       .catch(function (error) {
         if (probingLocal) {
@@ -1231,7 +1236,7 @@
     updateUrlToken();
     if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
     if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
-    requestSnapshot().then(connectEvents);
+    requestSnapshot(true).then(connectEvents);
   }
 
   function setup() {
@@ -1317,14 +1322,14 @@
         state.endpoint = initial.endpoint;
         state.token = savedRemoteToken;
         state.localAccess = false;
-        requestSnapshot().then(connectEvents);
+        requestSnapshot(true).then(connectEvents);
       });
     } else if (!state.token && !state.localAccess) {
       setConnection('Looking for this PC', 'connection-reconnecting');
       setNotice('Connecting to this PC automatically.');
       probeLocalEndpoint().then(function (connected) { if (connected) connectEvents(); });
     } else {
-      requestSnapshot().then(connectEvents);
+      requestSnapshot(Boolean(state.token && !state.localAccess)).then(connectEvents);
     }
   }
 
