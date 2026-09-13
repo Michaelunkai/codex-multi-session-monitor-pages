@@ -403,7 +403,10 @@
   function renderSummary(snapshot) {
     var summary = snapshot.summary || {};
     var sessions = snapshot.sessions || [];
-    var outputCount = sessions.filter(function (session) { return Array.isArray(session.liveOutput) && session.liveOutput.length > 0; }).length;
+    // An empty array is still an exact, fully hydrated IPC transcript: the
+    // turn is active but has not committed user-visible text yet. Only the
+    // compact first-paint shape (liveOutput omitted) is awaiting hydration.
+    var outputCount = sessions.filter(function (session) { return Array.isArray(session.liveOutput); }).length;
     // failClosedSnapshot proves this is the authoritative exact count. Never
     // display a separate, potentially stale count from a filtered DOM view.
     var running = sessions.length;
@@ -515,15 +518,93 @@
     list.appendChild(row);
   }
 
+  function entryKind(entry) {
+    var normalized = text(entry && entry.type, 'output').toLowerCase().replace(/[\s_-]/g, '');
+    if (normalized === 'assistant' || normalized === 'agentmessage' || normalized === 'assistantdelta') return 'assistant';
+    if (normalized === 'commandexecution' || normalized === 'commanddelta') return 'command';
+    if (normalized === 'filechange' || normalized === 'filechanged') return 'file';
+    if (normalized.indexOf('tool') >= 0 || normalized.indexOf('mcp') >= 0) return 'tool';
+    return 'event';
+  }
+
   function entryLabel(entry) {
-    var type = text(entry && entry.type, 'output');
-    var normalized = type.toLowerCase();
-    if (normalized === 'assistant' || normalized === 'agentmessage') return 'Codex output · live';
-    if (normalized === 'assistant-delta') return 'Codex output · streaming';
-    if (normalized === 'commandexecution') return 'Command output';
-    if (normalized === 'command-delta') return 'Command output · streaming';
-    if (normalized === 'custom_tool_call_output') return 'Tool output';
-    return type;
+    var kind = entryKind(entry);
+    if (kind === 'assistant') return 'Codex update';
+    if (kind === 'command') return 'Terminal output';
+    if (kind === 'tool') return 'Tool result';
+    if (kind === 'file') return 'File changed';
+    return text(entry && entry.type, 'Live event');
+  }
+
+  function entryIcon(entry) {
+    var kind = entryKind(entry);
+    if (kind === 'assistant') return '✦';
+    if (kind === 'command') return '›_';
+    if (kind === 'tool') return '◇';
+    if (kind === 'file') return 'Δ';
+    return '•';
+  }
+
+  function readableSize(value) {
+    var size = Math.max(0, Number(value) || 0);
+    if (size < 1000) return size + ' chars';
+    if (size < 1000000) return (size / 1000).toFixed(size < 10000 ? 1 : 0) + 'K chars';
+    return (size / 1000000).toFixed(1) + 'M chars';
+  }
+
+  function entryPresentation(entry, expanded) {
+    var raw = text(entry && entry.text, '');
+    var kind = entryKind(entry);
+    var limit = kind === 'assistant' ? 16000 : kind === 'file' ? 1600 : 7000;
+    if (expanded || raw.length <= limit) return { text: raw, omitted: 0, full: true };
+    if (kind === 'assistant') {
+      var opening = raw.slice(0, 2200).trimEnd();
+      var ending = raw.slice(-(limit - opening.length)).trimStart();
+      return { text: opening + '\n\n⋯  live response continues  ⋯\n\n' + ending, omitted: raw.length - opening.length - ending.length, full: false };
+    }
+    return { text: raw.slice(-limit).replace(/^\s+/, ''), omitted: raw.length - limit, full: false };
+  }
+
+  function appendInlineText(parent, value) {
+    var parts = String(value || '').split(/(`[^`\n]+`)/g);
+    parts.forEach(function (part) {
+      if (part.length >= 2 && part[0] === '`' && part[part.length - 1] === '`') parent.appendChild(make('code', 'inline-code', part.slice(1, -1)));
+      else if (part) parent.appendChild(document.createTextNode(part));
+    });
+  }
+
+  function renderAssistantText(container, value) {
+    var lines = String(value || '').replace(/\r\n?/g, '\n').split('\n');
+    var codeLines = [];
+    var inCode = false;
+    function flushCode() {
+      if (!codeLines.length) return;
+      container.appendChild(make('pre', 'transcript-code', codeLines.join('\n')));
+      codeLines = [];
+    }
+    lines.forEach(function (line) {
+      if (/^\s*```/.test(line)) {
+        if (inCode) flushCode();
+        inCode = !inCode;
+        return;
+      }
+      if (inCode) {
+        codeLines.push(line);
+        return;
+      }
+      if (!line.trim()) return;
+      var node;
+      var match = /^(#{1,3})\s+(.+)$/.exec(line);
+      if (match) node = make('div', 'prose-heading prose-heading-' + match[1].length);
+      else if (/^\s*[-*]\s+/.test(line)) node = make('div', 'prose-list-item');
+      else if (/^\s*\d+[.)]\s+/.test(line)) node = make('div', 'prose-list-item prose-numbered');
+      else if (/^\s*>\s?/.test(line)) node = make('blockquote', 'prose-quote');
+      else node = make('p', 'prose-paragraph');
+      var cleaned = match ? match[2] : line.replace(/^\s*>\s?/, '').replace(/^\s*[-*]\s+/, '• ').replace(/^\s*(\d+)[.)]\s+/, '$1. ');
+      appendInlineText(node, cleaned);
+      container.appendChild(node);
+    });
+    if (inCode || codeLines.length) flushCode();
   }
 
   function renderActivity(session) {
@@ -557,50 +638,71 @@
 
   function visibleTranscriptEntries(entries) {
     var source = Array.isArray(entries) ? entries : [];
-    var maxEntries = 24;
-    var maxChars = 120000;
-    var selected = [];
-    var chars = 0;
-    var omitted = false;
-    for (var index = source.length - 1; index >= 0; index -= 1) {
-      if (selected.length >= maxEntries || chars >= maxChars) {
-        omitted = true;
-        break;
-      }
-      var entry = source[index] || {};
-      var entryText = text(entry.text, '');
-      var remaining = maxChars - chars;
-      if (entryText.length > remaining) {
-        selected.push({
-          ...entry,
-          text: entryText.slice(-remaining),
-          presentationTruncated: true
-        });
-        chars += remaining;
-        omitted = true;
-        break;
-      }
-      selected.push(entry);
-      chars += entryText.length;
-    }
-    selected.reverse();
-    if ((omitted || selected.length < source.length) && selected.length) {
-      selected[0] = { ...selected[0], presentationTruncated: true };
-    }
+    var maxEntries = 18;
+    var selected = source.slice(-maxEntries);
+    if (selected.length && source.length > selected.length) selected[0] = { ...selected[0], presentationHistoryOmitted: source.length - selected.length };
     return selected;
   }
 
-  function renderTranscriptEntry(entry, index) {
-    var block = make('section', 'transcript-entry');
-    block.dataset.entryKey = outputEntryKey(entry, index);
-    var meta = make('div', 'transcript-entry-meta');
-    meta.appendChild(make('span', 'transcript-entry-kind', entryLabel(entry)));
-    meta.appendChild(make('span', 'transcript-entry-time', formatEntryTime(entry.at)));
-    block.appendChild(meta);
-    block.appendChild(make('pre', 'transcript-text', text(entry.text, '')));
-    if (entry.truncated || entry.presentationTruncated) {
-      block.appendChild(make('div', 'transcript-warning', 'Showing the newest live output; older transcript text is kept out of the page for instant, readable updates.'));
+  function renderTranscriptBody(block, entry) {
+    var body = block.querySelector('.transcript-text');
+    var presentation = entryPresentation(entry, Boolean(block.__expanded));
+    body.textContent = '';
+    body.className = 'transcript-text transcript-text-' + entryKind(entry);
+    if (entryKind(entry) === 'assistant') {
+      var prose = make('div', 'transcript-prose');
+      renderAssistantText(prose, presentation.text);
+      body.appendChild(prose);
+    } else {
+      body.appendChild(make('pre', 'terminal-text', presentation.text));
     }
+    Array.prototype.forEach.call(block.querySelectorAll('.transcript-entry-control, .transcript-warning'), function (node) { node.remove(); });
+    if (entry.presentationHistoryOmitted) {
+      block.appendChild(make('div', 'transcript-warning', entry.presentationHistoryOmitted + ' earlier events are folded away so the current work stays readable.'));
+    }
+    if (presentation.omitted > 0) {
+      block.appendChild(make('div', 'transcript-warning', 'Focused on the newest output · ' + readableSize(presentation.omitted) + ' folded.'));
+      var button = make('button', 'transcript-entry-control', block.__expanded ? 'Collapse output' : 'Show full output');
+      button.type = 'button';
+      button.addEventListener('click', function () {
+        block.__expanded = !block.__expanded;
+        renderTranscriptBody(block, block.__entry || entry);
+      });
+      block.appendChild(button);
+    } else if (block.__expanded && text(entry && entry.text, '').length > (entryKind(entry) === 'assistant' ? 16000 : 7000)) {
+      var collapse = make('button', 'transcript-entry-control', 'Collapse output');
+      collapse.type = 'button';
+      collapse.addEventListener('click', function () {
+        block.__expanded = false;
+        renderTranscriptBody(block, block.__entry || entry);
+      });
+      block.appendChild(collapse);
+    }
+    if (entry.truncated) block.appendChild(make('div', 'transcript-warning', 'The monitor reached its safe transcript limit for this session.'));
+  }
+
+  function renderTranscriptEntry(entry, index, isLatest) {
+    var kind = entryKind(entry);
+    var raw = text(entry && entry.text, '');
+    var className = 'transcript-entry transcript-entry-' + kind + (isLatest ? ' transcript-entry-latest' : '');
+    if (kind !== 'assistant' && /(^|\b)(error|failed|exception|fatal)(\b|:)/i.test(raw.slice(-5000))) className += ' transcript-entry-error';
+    var block = make('section', className);
+    block.dataset.entryKey = outputEntryKey(entry, index);
+    block.__entry = entry;
+    block.__expanded = false;
+    var meta = make('div', 'transcript-entry-meta');
+    var identity = make('div', 'transcript-entry-identity');
+    identity.appendChild(make('span', 'transcript-entry-icon', entryIcon(entry)));
+    identity.appendChild(make('span', 'transcript-entry-kind', entryLabel(entry)));
+    if (isLatest) identity.appendChild(make('span', 'transcript-live-badge', 'LIVE NOW'));
+    meta.appendChild(identity);
+    var facts = make('div', 'transcript-entry-facts');
+    facts.appendChild(make('span', 'transcript-entry-size', readableSize(raw.length)));
+    facts.appendChild(make('span', 'transcript-entry-time', formatEntryTime(entry.at)));
+    meta.appendChild(facts);
+    block.appendChild(meta);
+    block.appendChild(make('div', 'transcript-text transcript-text-' + kind));
+    renderTranscriptBody(block, entry);
     return block;
   }
 
@@ -611,7 +713,7 @@
       scroll.appendChild(make('div', 'transcript-empty', 'Codex is running; no user-visible output has been committed yet.'));
       return;
     }
-    visibleEntries.forEach(function (entry, index) { scroll.appendChild(renderTranscriptEntry(entry, index)); });
+    visibleEntries.forEach(function (entry, index) { scroll.appendChild(renderTranscriptEntry(entry, index, index === visibleEntries.length - 1)); });
   }
 
   function renderTranscript(session) {
@@ -711,15 +813,24 @@
     return null;
   }
 
-  function updateTranscriptEntry(block, entry, index) {
+  function updateTranscriptEntry(block, entry, index, isLatest) {
+    var kind = entryKind(entry);
+    var raw = text(entry && entry.text, '');
+    var className = 'transcript-entry transcript-entry-' + kind + (isLatest ? ' transcript-entry-latest' : '');
+    if (kind !== 'assistant' && /(^|\b)(error|failed|exception|fatal)(\b|:)/i.test(raw.slice(-5000))) className += ' transcript-entry-error';
+    block.className = className;
     block.dataset.entryKey = outputEntryKey(entry, index);
+    block.__entry = entry;
+    var icon = block.querySelector('.transcript-entry-icon');
+    if (icon) icon.textContent = entryIcon(entry);
     block.querySelector('.transcript-entry-kind').textContent = entryLabel(entry);
     block.querySelector('.transcript-entry-time').textContent = formatEntryTime(entry.at);
-    block.querySelector('.transcript-text').textContent = text(entry.text, '');
-    var warning = block.querySelector('.transcript-warning');
-    var showWarning = entry.truncated || entry.presentationTruncated;
-    if (showWarning && !warning) block.appendChild(make('div', 'transcript-warning', 'Showing the newest live output; older transcript text is kept out of the page for instant, readable updates.'));
-    if (!showWarning && warning) warning.remove();
+    var size = block.querySelector('.transcript-entry-size');
+    if (size) size.textContent = readableSize(raw.length);
+    var badge = block.querySelector('.transcript-live-badge');
+    if (isLatest && !badge) block.querySelector('.transcript-entry-identity').appendChild(make('span', 'transcript-live-badge', 'LIVE NOW'));
+    if (!isLatest && badge) badge.remove();
+    renderTranscriptBody(block, entry);
   }
 
   function syncTranscript(card, session, output) {
@@ -731,6 +842,7 @@
     if (count) count.textContent = transcriptCountText(session);
     if (!output) return;
     var entries = Array.isArray(session.liveOutput) ? session.liveOutput : [];
+    var visibleEntries = visibleTranscriptEntries(entries);
     var wasAtBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 24;
     if (output.mode !== 'patch') {
       renderTranscriptContents(scroll, entries);
@@ -744,20 +856,30 @@
         var entryIndex = entries.findIndex(function (entry, index) { return outputEntryKey(entry, index) === key; });
         if (entryIndex < 0) return;
         var entry = entries[entryIndex];
+        var visibleIndex = visibleEntries.findIndex(function (candidate, index) { return outputEntryKey(candidate, index) === key; });
+        if (visibleIndex < 0) return;
+        entry = visibleEntries[visibleIndex];
         var block = transcriptEntryFor(scroll, key);
-        if (block) updateTranscriptEntry(block, entry, entryIndex);
+        if (block) updateTranscriptEntry(block, entry, entryIndex, visibleIndex === visibleEntries.length - 1);
         else {
           var empty = scroll.querySelector('.transcript-empty');
           if (empty) empty.remove();
-          scroll.appendChild(renderTranscriptEntry(entry, entryIndex));
+          scroll.appendChild(renderTranscriptEntry(entry, entryIndex, visibleIndex === visibleEntries.length - 1));
         }
       });
       var blocks = scroll.querySelectorAll('.transcript-entry');
-      var ordered = blocks.length === entries.length;
-      for (var index = 0; ordered && index < entries.length; index += 1) {
-        ordered = blocks[index].dataset.entryKey === outputEntryKey(entries[index], index);
+      var ordered = blocks.length === visibleEntries.length;
+      for (var index = 0; ordered && index < visibleEntries.length; index += 1) {
+        ordered = blocks[index].dataset.entryKey === outputEntryKey(visibleEntries[index], index);
       }
       if (!ordered) renderTranscriptContents(scroll, entries);
+      else Array.prototype.forEach.call(blocks, function (block, blockIndex) {
+        var latest = blockIndex === blocks.length - 1;
+        block.classList.toggle('transcript-entry-latest', latest);
+        var badge = block.querySelector('.transcript-live-badge');
+        if (latest && !badge) block.querySelector('.transcript-entry-identity').appendChild(make('span', 'transcript-live-badge', 'LIVE NOW'));
+        if (!latest && badge) badge.remove();
+      });
     }
     if (wasAtBottom) scroll.scrollTop = scroll.scrollHeight;
   }
